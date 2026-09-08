@@ -1,0 +1,90 @@
+import { ThymePalette, ThymeSpace, ThymeType } from "tokens.slint";
+import { ThymeCard } from "card.slint";
+import { ThymeButton, ThymeButtonKind } from "button.slint";
+import { ThymeCheckbox } from "checkbox.slint";
+import { ThymeSlider } from "slider.slint";
+
+// ThymeSettingsPanel — the app-wide settings overlay both dashboard
+// windows expose from `ThymeHeader`'s "Settings" button. Backed by
+// `services::settings_service` — a plain key=value file rather than a
+// server-side concept, since these are per-machine/per-terminal
+// preferences (mic input gain, sign-out confirmation), not clinical
+// data that belongs on the server.
+//
+// Same overlay/Escape-to-cancel pattern as `PatientCreateForm`: the
+// caller (`DoctorWindow`/`ReceptionistWindow`) owns visibility.
+export component ThymeSettingsPanel inherits ThymeCard {
+    in-out property <float> mic-gain: 1.0;
+    in-out property <bool> confirm-before-sign-out: false;
+    // Not every window this panel is embedded in has a microphone
+    // input to apply this to (see `ReceptionistWindow`) — the caller
+    // decides whether the field is shown at all.
+    in property <bool> show-mic-gain: true;
+    in property <string> error-text: "";
+
+    callback saved();
+    callback cancelled();
+
+    clip: true;
+
+    VerticalLayout {
+        padding: ThymeSpace.xl;
+        spacing: ThymeSpace.lg;
+
+        VerticalLayout {
+            spacing: ThymeSpace.xs;
+
+            Text {
+                text: "Settings";
+                font-size: ThymeType.size-lg;
+                font-weight: 700;
+                color: ThymePalette.text-primary;
+            }
+
+            Text {
+                text: "Preferences apply immediately on this computer.";
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+                wrap: word-wrap;
+            }
+        }
+
+        if root.show-mic-gain: ThymeSlider {
+            label: "Microphone gain";
+            minimum: 0.0;
+            maximum: 2.0;
+            value <=> root.mic-gain;
+            value-label: (root.mic-gain * 100) + "%";
+        }
+
+        ThymeCheckbox {
+            label: "Confirm before signing out";
+            checked <=> root.confirm-before-sign-out;
+        }
+
+        if root.error-text != "": Text {
+            text: root.error-text;
+            color: ThymePalette.danger;
+            font-size: ThymeType.size-sm;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: ThymeSpace.md;
+            alignment: end;
+
+            ThymeButton {
+                text: "Cancel";
+                kind: ThymeButtonKind.ghost;
+                width: 96px;
+                clicked => { root.cancelled(); }
+            }
+
+            ThymeButton {
+                text: "Save";
+                kind: ThymeButtonKind.primary;
+                clicked => { root.saved(); }
+            }
+        }
+    }
+}

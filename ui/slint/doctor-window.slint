@@ -1,0 +1,587 @@
+import { ThymePalette, ThymeSpace, ThymeType, ThymeRadius } from "design/tokens.slint";
+import { ThymeHeader } from "design/header.slint";
+import { ThymeSidebar, ThymeSidebarItem } from "design/sidebar.slint";
+import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
+import { ThymeSettingsPanel } from "design/settings-panel.slint";
+import { ThymeConfirmDialog } from "design/confirm-dialog.slint";
+import { QueueEntryRow, QueueEntryCard } from "queue-entry-row.slint";
+import { SuggestionRow, ThymeSuggestionCard } from "suggestion-row.slint";
+import { PatientFileView, PatientRow, PatientFileData } from "patient-file-view.slint";
+export { QueueEntryRow } from "queue-entry-row.slint";
+export { SuggestionRow } from "suggestion-row.slint";
+export { PatientRow, HistoryEntryRow, PatientFileData } from "patient-file-view.slint";
+
+export component DoctorWindow inherits Window {
+    title: "Thyme — Doctor";
+    // `width`/`height` on a Window pin it to a fixed size and stop it
+    // participating in resize layout — the window just sits frozen at
+    // whatever value was given. `preferred-*` sets the same initial
+    // size but lets the window (and everything inside it, via the
+    // `100%`/stretch layouts below) actually track a real resize.
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 520px;
+    background: ThymePalette.background;
+
+    in property <string> user-display-name: "";
+    in property <string> connection-status-text: "Connected";
+    in property <ThymeChipTone> connection-status-tone: ThymeChipTone.success;
+
+    in-out property <int> selected-nav-index: 0;
+
+    in property <[QueueEntryRow]> queue-entries: [];
+    in property <string> queue-error-text: "";
+    callback queue-advance-requested(string, string);
+
+    in property <bool> recording-active: false;
+    in property <string> recording-error-text: "";
+
+    // Voice recording only makes clinical sense — and is only accepted
+    // by the server (`packets::ai::ProcessTranscriptionPacket`'s doc
+    // comment) — while a patient is actually `"with_doctor"` right now,
+    // so today's transcript can be paired with their history. Computed
+    // from the same queue snapshot that drives `queue-entries` below
+    // (see `controllers::doctor::listen_queue`), not set by hand.
+    in property <bool> has-patient-with-doctor: false;
+    in property <string> current-patient-id: "";
+    in property <string> current-patient-name: "";
+
+    // Drives the transcription side panel further down. Kept as a
+    // plain string (rather than a Slint enum) so the Rust side can
+    // drive it with a simple `set_transcription_state("...".into())`
+    // call, same pattern as `connection-status-text`.
+    // One of "idle" | "transcribing" | "done" | "error".
+    in property <string> transcription-state: "idle";
+    in property <string> last-transcript: "";
+    in property <string> transcript-error-text: "";
+    callback transcription-panel-dismissed();
+
+    // The AI review panel, shown once a transcript comes back
+    // transcribed: `ai-processing` covers the gap between the
+    // transcript being ready and the model's suggestions arriving
+    // (`packets::ai::ProcessTranscriptionPacket` -> `AiSuggestionsResponse`),
+    // `ai-suggestions` is what to show once they do, and `ai-error-text`
+    // surfaces any failure along the way (processing, or applying/
+    // rejecting one of the suggestions).
+    in property <bool> ai-processing: false;
+    in property <string> ai-error-text: "";
+    in property <string> ai-transcription-id: "";
+    in property <[SuggestionRow]> ai-suggestions: [];
+    callback suggestion-accepted(string);
+    callback suggestion-rejected(string);
+    callback approve-all-requested();
+
+    // Which (if any) `needs_clarification` suggestion is currently
+    // having its answer dictated — at most one at a time, since voice
+    // answers share the same recorder/STT pipeline as the main
+    // transcript (see `controllers::doctor::DoctorController`).
+    in property <string> recording-clarification-id: "";
+    callback clarification-answer-submitted(string, string);
+    callback clarification-voice-toggled(string);
+
+    // Cycles the little braille glyph used as the "Transcribing…"
+    // loading wheel — see `spinner-timer` below.
+    property <int> spinner-tick: 0;
+    property <[string]> spinner-frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    spinner-timer := Timer {
+        interval: 90ms;
+        running: root.transcription-state == "transcribing" || root.ai-processing;
+        triggered => {
+            root.spinner-tick = root.spinner-tick + 1 >= root.spinner-frames.length ? 0 : root.spinner-tick + 1;
+        }
+    }
+
+    in-out property <bool> show-settings: false;
+    in-out property <float> settings-mic-gain: 1.0;
+    in-out property <bool> settings-confirm-sign-out: false;
+    in property <string> settings-error-text: "";
+    callback settings-requested();
+    callback settings-saved();
+    callback settings-cancelled();
+
+    in-out property <bool> show-sign-out-confirm: false;
+    callback sign-out-confirmed();
+    callback sign-out-cancelled();
+
+    callback shortcut-pressed();
+    callback shortcut-released();
+    callback sign-out();
+
+    function next-status(status: string) -> string {
+        if (status == "waiting") {
+            return "with_doctor";
+        }
+        if (status == "with_doctor") {
+            return "done";
+        }
+        return "";
+    }
+
+    function action-label-for(status: string) -> string {
+        if (status == "waiting") {
+            return "Start visit";
+        }
+        if (status == "with_doctor") {
+            return "Complete";
+        }
+        return "";
+    }
+
+    // FIXED: Slint doesn't support imperative array iterations in property bindings. 
+    // The backend must compute this count and update the property.
+    in property <int> waiting-count: 0;
+
+    // The "Patients" tab (sidebar index 1): search for any patient on
+    // file — checked in today or not — and open their full chart. See
+    // `PatientFileView` for the search/results/file-panel markup;
+    // everything here is just the plumbing to `controllers::doctor`.
+    in-out property <string> patients-search-query: "";
+    in property <[PatientRow]> patients-search-results: [];
+    in property <bool> patients-search-busy: false;
+    in property <string> patients-search-error-text: "";
+    in property <string> patients-selected-patient-id: "";
+    in property <bool> patients-file-loading: false;
+    in property <string> patients-file-error-text: "";
+    in property <bool> patients-has-file: false;
+    in property <PatientFileData> patients-file: {
+        patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
+        clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
+        medications: [], lab-orders: [], referrals: [],
+    };
+    callback patients-search-edited(string);
+    callback patients-patient-selected(string);
+
+    scope := FocusScope {
+        // FIXED: Replaced standard `accept`/`reject` with `return EventResult.accept/reject;`
+        key-pressed(event) => {
+            if ((event.text == "r" || event.text == "R") && event.modifiers.control) {
+                root.shortcut-pressed();
+                return EventResult.accept;
+            } else {
+                return EventResult.reject;
+            }
+        }
+        key-released(event) => {
+            if (event.text == "r" || event.text == "R") {
+                root.shortcut-released();
+                return EventResult.accept;
+            } else {
+                return EventResult.reject;
+            }
+        }
+
+        VerticalLayout {
+
+            ThymeHeader {
+                user-display-name: root.user-display-name;
+                connection-status-text: root.connection-status-text;
+                connection-status-tone: root.connection-status-tone;
+                section-label: "Doctor";
+                sign-out => { root.sign-out(); }
+                settings-requested => { root.settings-requested(); }
+            }
+
+            HorizontalLayout {
+                vertical-stretch: 1;
+
+                ThymeSidebar {
+                    items: [
+                        { label: "Dashboard", enabled: true },
+                        { label: "Patients", enabled: true },
+                        { label: "Encounters", enabled: false },
+                    ];
+                    selected-index: root.selected-nav-index;
+                    item-selected(index) => { root.selected-nav-index = index; }
+                }
+
+                if root.selected-nav-index == 0: Rectangle {
+                    horizontal-stretch: 1;
+                    background: ThymePalette.background;
+
+                    VerticalLayout {
+                        padding: ThymeSpace.xl;
+                        spacing: ThymeSpace.lg;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            Text {
+                                text: "Today";
+                                font-size: ThymeType.size-lg;
+                                font-weight: 700;
+                                color: ThymePalette.text-primary;
+                            }
+
+                            ThymeStatusChip {
+                                text: root.waiting-count + " waiting";
+                                tone: root.waiting-count > 0 ? ThymeChipTone.warning : ThymeChipTone.neutral;
+                            }
+                        }
+
+                        Text {
+                            text: root.has-patient-with-doctor
+                                ? "Hold Ctrl+R anywhere in this window to record a voice note for " + root.current-patient-name + ". Release R to stop and transcribe."
+                                : "Start a patient's visit below (\"Start visit\") before recording a voice note — recording needs a patient in the room to attach the note to.";
+                            font-size: ThymeType.size-xs;
+                            color: root.has-patient-with-doctor ? ThymePalette.text-secondary : ThymePalette.warning;
+                            wrap: word-wrap;
+                        }
+
+                        if root.queue-error-text != "": ThymeStatusChip {
+                            text: root.queue-error-text;
+                            tone: ThymeChipTone.danger;
+                        }
+
+                        if root.queue-entries.length == 0: Text {
+                            text: "No patients currently waiting.";
+                            color: ThymePalette.text-secondary;
+                            font-size: ThymeType.size-md;
+                        }
+
+                        if root.queue-entries.length > 0: Flickable {
+                            vertical-stretch: 1;
+
+                            VerticalLayout {
+                                spacing: ThymeSpace.sm;
+
+                                for entry in root.queue-entries: QueueEntryCard {
+                                    entry: entry;
+                                    show-action: root.next-status(entry.status) != "";
+                                    action-label: root.action-label-for(entry.status);
+                                    action-clicked => {
+                                        root.queue-advance-requested(entry.queue-id, root.next-status(entry.status));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.selected-nav-index == 1: PatientFileView {
+                    horizontal-stretch: 1;
+                    search-query <=> root.patients-search-query;
+                    results: root.patients-search-results;
+                    searching: root.patients-search-busy;
+                    error-text: root.patients-search-error-text;
+                    selected-patient-id: root.patients-selected-patient-id;
+                    file-loading: root.patients-file-loading;
+                    file-error-text: root.patients-file-error-text;
+                    has-file: root.patients-has-file;
+                    file: root.patients-file;
+                    search-edited(query) => { root.patients-search-edited(query); }
+                    patient-selected(id) => { root.patients-patient-selected(id); }
+                }
+
+            }
+        }
+
+        if root.show-settings: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea {}
+
+            settings-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.settings-cancelled();
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                // Positioned directly with floor()'d coordinates rather
+                // than nested `alignment: center` layouts — the panel's
+                // auto-height comes from odd font sizes plus paddings,
+                // so a layout-computed center can land on a .5px
+                // fractional offset and blur every thin 1px border
+                // inside it (card border, text field borders, checkbox).
+                settings-panel := ThymeSettingsPanel {
+                    width: 420px;
+                    x: ((parent.width - self.width) / 2);
+                    y: ((parent.height - self.height) / 2);
+                    mic-gain <=> root.settings-mic-gain;
+                    confirm-before-sign-out <=> root.settings-confirm-sign-out;
+                    show-mic-gain: true;
+                    error-text: root.settings-error-text;
+                    saved => { root.settings-saved(); }
+                    cancelled => { root.settings-cancelled(); }
+                }
+
+                init => {
+                    settings-scope.focus();
+                }
+            }
+        }
+
+        if root.show-sign-out-confirm: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea {}
+
+            confirm-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.sign-out-cancelled();
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        ThymeConfirmDialog {
+                            width: 360px;
+                            title: "Sign out?";
+                            message: "You'll need to sign in again to continue.";
+                            confirm-label: "Sign out";
+                            cancel-label: "Stay signed in";
+                            danger: true;
+                            confirmed => { root.sign-out-confirmed(); }
+                            cancelled => { root.sign-out-cancelled(); }
+                        }
+                    }
+                }
+
+                init => {
+                    confirm-scope.focus();
+                }
+            }
+        }
+
+        // Floating, non-modal indicator for the Ctrl+R shortcut itself
+        // (recording in progress, or a device error) — since recording
+        // can now be triggered from anywhere in the window rather than
+        // only from a dedicated tab, this is the one place that state
+        // is ever visible. Deliberately has no backdrop/TouchArea: it
+        // must never block interaction with the rest of the dashboard.
+        if root.recording-active || root.recording-error-text != "": Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+
+            Rectangle {
+                width: 320px;
+                x: parent.width - self.width - ThymeSpace.xl;
+                y: parent.height - self.height - ThymeSpace.xl;
+                border-radius: ThymeRadius.lg;
+                background: ThymePalette.danger-surface;
+                border-width: 1px;
+                border-color: ThymePalette.danger;
+                drop-shadow-color: #00000022;
+                drop-shadow-blur: 12px;
+                drop-shadow-offset-y: 2px;
+
+                HorizontalLayout {
+                    padding: ThymeSpace.md;
+                    spacing: ThymeSpace.sm;
+
+                    if root.recording-active: Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        y: (parent.height - self.height) / 2;
+                        background: ThymePalette.danger;
+                    }
+
+                    Text {
+                        text: root.recording-active ? "Recording… release Ctrl+R to stop" : root.recording-error-text;
+                        font-size: ThymeType.size-sm;
+                        font-weight: 600;
+                        color: ThymePalette.danger;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // The transcription side panel: appears the moment a finished
+        // recording is handed to the STT interface, and stays up
+        // through success/failure until the person dismisses it (or,
+        // on success, it dismisses itself shortly after — see
+        // `controllers::doctor::DoctorController::stop_recording_now`).
+        if root.transcription-state != "idle": Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+
+            Rectangle {
+                width: 320px;
+                height: 100%;
+                x: parent.width - self.width;
+                y: 0;
+                background: ThymePalette.surface;
+                border-width: 1px;
+                border-color: ThymePalette.border;
+                drop-shadow-color: #00000022;
+                drop-shadow-blur: 20px;
+                drop-shadow-offset-x: -2px;
+
+                // Swallows clicks so they can't fall through onto
+                // dashboard content the panel is covering.
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: ThymeSpace.xl;
+                    spacing: ThymeSpace.lg;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        Text {
+                            text: "Voice note";
+                            font-size: ThymeType.size-lg;
+                            font-weight: 700;
+                            color: ThymePalette.text-primary;
+                            vertical-alignment: center;
+                        }
+
+                        ThymeButton {
+                            text: "×";
+                            kind: ThymeButtonKind.ghost;
+                            width: 32px;
+                            clicked => { root.transcription-panel-dismissed(); }
+                        }
+                    }
+
+                    if root.transcription-state == "transcribing": VerticalLayout {
+                        spacing: ThymeSpace.md;
+
+                        Text {
+                            text: root.spinner-frames[root.spinner-tick];
+                            font-size: 32px;
+                            color: ThymePalette.accent;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Transcribing…";
+                            font-size: ThymeType.size-md;
+                            color: ThymePalette.text-secondary;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    if root.transcription-state == "done": Flickable {
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            spacing: ThymeSpace.md;
+
+                            ThymeStatusChip {
+                                text: "Transcribed";
+                                tone: ThymeChipTone.success;
+                            }
+
+                            Text {
+                                text: root.last-transcript;
+                                font-size: ThymeType.size-sm;
+                                color: ThymePalette.text-primary;
+                                wrap: word-wrap;
+                            }
+
+                            if root.ai-processing: HorizontalLayout {
+                                spacing: ThymeSpace.sm;
+
+                                Text {
+                                    text: root.spinner-frames[root.spinner-tick];
+                                    font-size: ThymeType.size-md;
+                                    color: ThymePalette.accent;
+                                }
+
+                                Text {
+                                    text: "Reviewing transcript for chart updates…";
+                                    font-size: ThymeType.size-sm;
+                                    color: ThymePalette.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            if root.ai-error-text != "": ThymeStatusChip {
+                                text: root.ai-error-text;
+                                tone: ThymeChipTone.danger;
+                            }
+
+                            if root.ai-suggestions.length > 0: VerticalLayout {
+                                spacing: ThymeSpace.sm;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+
+                                    Text {
+                                        text: "Suggested chart updates";
+                                        font-size: ThymeType.size-sm;
+                                        font-weight: 700;
+                                        color: ThymePalette.text-primary;
+                                        vertical-alignment: center;
+                                    }
+
+                                    ThymeButton {
+                                        text: "Approve all";
+                                        kind: ThymeButtonKind.secondary;
+                                        height: 30px;
+                                        clicked => { root.approve-all-requested(); }
+                                    }
+                                }
+
+                                for suggestion in root.ai-suggestions: ThymeSuggestionCard {
+                                    suggestion: suggestion;
+                                    voice-answer-active: root.recording-clarification-id == suggestion.suggestion-id;
+                                    accept-clicked => { root.suggestion-accepted(suggestion.suggestion-id); }
+                                    reject-clicked => { root.suggestion-rejected(suggestion.suggestion-id); }
+                                    answer-submitted(answer) => { root.clarification-answer-submitted(suggestion.suggestion-id, answer); }
+                                    voice-answer-toggled => { root.clarification-voice-toggled(suggestion.suggestion-id); }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.transcription-state == "error": VerticalLayout {
+                        spacing: ThymeSpace.md;
+
+                        ThymeStatusChip {
+                            text: "Transcription failed";
+                            tone: ThymeChipTone.danger;
+                        }
+
+                        Text {
+                            text: root.transcript-error-text;
+                            font-size: ThymeType.size-sm;
+                            color: ThymePalette.danger;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    changed show-settings => {
+        if (!root.show-settings) {
+            scope.focus();
+        }
+    }
+
+    changed show-sign-out-confirm => {
+        if (!root.show-sign-out-confirm) {
+            scope.focus();
+        }
+    }
+
+    init => {
+        scope.focus();
+    }
+}

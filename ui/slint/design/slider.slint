@@ -1,0 +1,103 @@
+import { ThymePalette, ThymeSpace, ThymeType } from "tokens.slint";
+
+// ThymeSlider — minimal drag-to-set slider. This project has no
+// std-widgets slider (see tokens.slint's header comment: every control
+// here is hand-rolled so it stays visually consistent) — dragging the
+// track/handle updates `value`, clamped to [minimum, maximum].
+//
+// Deliberately only reacts to drag (`moved` while `pressed`), not a
+// bare click-without-drag — the simplest reliable recipe without
+// depending on lower-level pointer-event details.
+export component ThymeSlider inherits Rectangle {
+    in property <string> label: "";
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+    in-out property <float> value: 0.0;
+    in property <bool> enabled: true;
+    // Pre-formatted display value (e.g. "100%"), kept out of this
+    // component so it stays free of unit/locale formatting logic —
+    // same rationale as `PatientRow.detail-line`.
+    in property <string> value-label: "";
+
+    height: 44px;
+
+    property <float> ratio: root.maximum > root.minimum
+        ? (root.value - root.minimum) / (root.maximum - root.minimum)
+        : 0.0;
+
+    function set-from-ratio(r: float) {
+        root.value = root.minimum + (r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r)) * (root.maximum - root.minimum);
+    }
+
+    VerticalLayout {
+        spacing: ThymeSpace.xs;
+
+        HorizontalLayout {
+            alignment: space-between;
+
+            if root.label != "": Text {
+                text: root.label;
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+            }
+
+            if root.value-label != "": Text {
+                text: root.value-label;
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+            }
+        }
+
+        track := Rectangle {
+            height: 20px;
+
+            // Handle radius reserved as inset padding on both sides, so
+            // the handle's travel is confined to [handle-radius,
+            // track.width - handle-radius] and can never overflow the
+            // track bounds. Fill bar and handle both derive their
+            // position from this same usable width.
+            property <length> handle-diameter: 16px;
+            property <length> handle-radius: self.handle-diameter / 2;
+            property <length> usable-width: track.width - self.handle-diameter;
+            property <length> handle-center-x: self.handle-radius + self.usable-width * root.ratio;
+
+            Rectangle {
+                height: 6px;
+                y: (parent.height - self.height) / 2;
+                x: track.handle-radius;
+                width: track.usable-width;
+                border-radius: 3px;
+                background: ThymePalette.surface-muted;
+            }
+
+            Rectangle {
+                height: 6px;
+                y: (parent.height - self.height) / 2;
+                x: track.handle-radius;
+                width: track.usable-width * root.ratio;
+                border-radius: 3px;
+                background: root.enabled ? ThymePalette.accent : ThymePalette.border;
+            }
+
+            Rectangle {
+                width: track.handle-diameter;
+                height: track.handle-diameter;
+                border-radius: self.width / 2;
+                x: track.handle-center-x - self.width / 2;
+                y: (parent.height - self.height) / 2;
+                background: root.enabled ? ThymePalette.accent : ThymePalette.border;
+                border-width: 2px;
+                border-color: ThymePalette.surface;
+            }
+
+            TouchArea {
+                enabled: root.enabled;
+                moved => {
+                    if (self.pressed) {
+                        root.set-from-ratio((self.mouse-x - track.handle-radius) / track.usable-width);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,58 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "tokens.slint";
+
+export struct ThymeSidebarItem {
+    label: string,
+    enabled: bool,
+}
+
+// ThymeSidebar — primary navigation rail for a role dashboard
+// (THYME_UI_SPEC.md §3 global information architecture, §62
+// role-specific UI). Items that aren't backed by anything yet are shown
+// disabled rather than omitted, so the information architecture stays
+// legible even before every module exists — the shell should never
+// silently imply the app can do less than it will.
+export component ThymeSidebar inherits Rectangle {
+    in property <[ThymeSidebarItem]> items: [];
+    in property <int> selected-index: 0;
+    callback item-selected(int);
+
+    width: 208px;
+    background: ThymePalette.surface;
+    border-width: 1px;
+    border-color: ThymePalette.border;
+
+    VerticalLayout {
+        padding: ThymeSpace.md;
+        spacing: ThymeSpace.xs;
+        alignment: start;
+
+        for entry[index] in root.items: Rectangle {
+            height: 40px;
+            border-radius: ThymeRadius.sm;
+            background: index == root.selected-index ? ThymePalette.success-surface
+                : row-touch.has-hover && entry.enabled ? ThymePalette.surface-muted
+                : transparent;
+
+            row-touch := TouchArea {
+                enabled: entry.enabled;
+                clicked => { root.item-selected(index); }
+            }
+
+            HorizontalLayout {
+                padding-left: ThymeSpace.md;
+                padding-right: ThymeSpace.md;
+                alignment: start;
+
+                Text {
+                    text: entry.label;
+                    font-size: ThymeType.size-md;
+                    font-weight: index == root.selected-index ? 700 : 500;
+                    color: !entry.enabled ? ThymePalette.text-secondary
+                        : index == root.selected-index ? ThymePalette.success
+                        : ThymePalette.text-primary;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

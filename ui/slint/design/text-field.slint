@@ -1,0 +1,73 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "tokens.slint";
+
+// ThymeTextField — labeled input with an inline error slot and
+// Enter-to-submit, matching the keyboard-first data-entry strategy in
+// THYME_UI_SPEC.md §42 (Enter moves to the next action, not just the next
+// field).
+export component ThymeTextField inherits Rectangle {
+    in property <string> label: "";
+    in property <string> placeholder: "";
+    in property <bool> is-password: false;
+    in property <string> error-text: "";
+    in property <bool> enabled: true;
+    in-out property <string> text: "";
+
+    callback accepted();
+    callback edited();
+
+    forward-focus: input;
+    public function focus-input() {
+        input.focus();
+    }
+
+    VerticalLayout {
+        spacing: ThymeSpace.xs;
+
+        if root.label != "": Text {
+            text: root.label;
+            font-size: ThymeType.size-sm;
+            color: ThymePalette.text-secondary;
+        }
+
+        Rectangle {
+            height: 38px;
+            border-radius: ThymeRadius.sm;
+            background: root.enabled ? ThymePalette.surface : ThymePalette.surface-muted;
+            border-width: 1px;
+            border-color: root.error-text != "" ? ThymePalette.danger
+                : input.has-focus ? ThymePalette.accent
+                : ThymePalette.border;
+
+            input := TextInput {
+                x: ThymeSpace.md;
+                width: parent.width - 2 * ThymeSpace.md;
+                y: 0;
+                height: parent.height;
+                text <=> root.text;
+                enabled: root.enabled;
+                input-type: root.is-password ? InputType.password : InputType.text;
+                font-size: ThymeType.size-md;
+                color: ThymePalette.text-primary;
+                vertical-alignment: center;
+                accepted => { root.accepted(); }
+                edited => { root.edited(); }
+            }
+
+            if root.text == "" && !input.has-focus: Text {
+                x: ThymeSpace.md;
+                width: parent.width - 2 * ThymeSpace.md;
+                height: parent.height;
+                text: root.placeholder;
+                color: ThymePalette.text-secondary;
+                font-size: ThymeType.size-md;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.error-text != "": Text {
+            text: root.error-text;
+            color: ThymePalette.danger;
+            font-size: ThymeType.size-xs;
+        }
+    }
+}

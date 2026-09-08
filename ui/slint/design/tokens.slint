@@ -1,0 +1,56 @@
+// ThymeDesign — foundation tokens.
+//
+// Every visual primitive in the app pulls its colors, spacing, radii and
+// type sizes from here rather than hard-coding values. This is the single
+// place a future usability pass (see THYME_UI_SPEC.md §65 Accessibility)
+// changes to retune the whole app.
+
+export global ThymePalette {
+    // Surfaces
+    out property <color> background: #f4f6f7;
+    out property <color> surface: #ffffff;
+    out property <color> surface-muted: #eef1f2;
+    out property <color> border: #d7dde0;
+
+    // Text
+    out property <color> text-primary: #1c2b2e;
+    out property <color> text-secondary: #52666b;
+    out property <color> text-inverted: #ffffff;
+
+    // Brand / primary action
+    out property <color> accent: #2f7d6b;
+    out property <color> accent-hover: #266657;
+    out property <color> accent-pressed: #1e5245;
+
+    // Semantic / safety
+    out property <color> danger: #b3261e;
+    out property <color> danger-surface: #fbebea;
+    out property <color> warning: #a15c00;
+    out property <color> warning-surface: #fdf1de;
+    out property <color> success: #1e6b46;
+    out property <color> success-surface: #e8f5ee;
+    out property <color> info-surface: #e7eef2;
+}
+
+export global ThymeSpace {
+    out property <length> xs: 4px;
+    out property <length> sm: 8px;
+    out property <length> md: 12px;
+    out property <length> lg: 16px;
+    out property <length> xl: 24px;
+    out property <length> xxl: 32px;
+}
+
+export global ThymeRadius {
+    out property <length> sm: 4px;
+    out property <length> md: 8px;
+    out property <length> lg: 12px;
+}
+
+export global ThymeType {
+    out property <length> size-xs: 11px;
+    out property <length> size-sm: 13px;
+    out property <length> size-md: 15px;
+    out property <length> size-lg: 19px;
+    out property <length> size-xl: 24px;
+}

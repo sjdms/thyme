@@ -1,0 +1,40 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "tokens.slint";
+
+export enum ThymeChipTone { neutral, info, warning, danger, success }
+
+// ThymeStatusChip — the app's one way of saying "here is a small but
+// important piece of state" (connecting, searching, an error, a warning).
+// Per THYME_UI_SPEC.md §79 "No hidden state", transient status should
+// always be visible through a primitive like this rather than silently
+// swallowed.
+export component ThymeStatusChip inherits Rectangle {
+    in property <string> text: "";
+    in property <ThymeChipTone> tone: ThymeChipTone.neutral;
+
+    property <color> bg: root.tone == ThymeChipTone.danger ? ThymePalette.danger-surface
+        : root.tone == ThymeChipTone.warning ? ThymePalette.warning-surface
+        : root.tone == ThymeChipTone.success ? ThymePalette.success-surface
+        : root.tone == ThymeChipTone.info ? ThymePalette.info-surface
+        : ThymePalette.surface-muted;
+    property <color> fg: root.tone == ThymeChipTone.danger ? ThymePalette.danger
+        : root.tone == ThymeChipTone.warning ? ThymePalette.warning
+        : root.tone == ThymeChipTone.success ? ThymePalette.success
+        : ThymePalette.text-secondary;
+
+    background: root.bg;
+    border-radius: ThymeRadius.sm;
+    height: 24px;
+
+    HorizontalLayout {
+        padding-left: ThymeSpace.sm;
+        padding-right: ThymeSpace.sm;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: root.fg;
+            font-size: ThymeType.size-xs;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}

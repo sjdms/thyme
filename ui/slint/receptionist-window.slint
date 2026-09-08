@@ -1,0 +1,276 @@
+import { PatientRow } from "patient-result-row.slint";
+import { ThymePalette, ThymeSpace, ThymeType } from "design/tokens.slint";
+import { ThymeHeader } from "design/header.slint";
+import { ThymeSidebar, ThymeSidebarItem } from "design/sidebar.slint";
+import { ThymeChipTone } from "design/status-chip.slint";
+import { ThymeSettingsPanel } from "design/settings-panel.slint";
+import { ThymeConfirmDialog } from "design/confirm-dialog.slint";
+import { PatientSearchView } from "patient-search-view.slint";
+import { PatientCreateForm } from "patient-create-form.slint";
+import { QueueEntryRow, QueueEntryCard } from "queue-entry-row.slint";
+
+// FIXED: `PatientRow` must be exported from the file it was actually imported from.
+export { PatientRow } from "patient-result-row.slint";
+export { QueueEntryRow } from "queue-entry-row.slint";
+
+export component ReceptionistWindow inherits Window {
+    title: "Thyme — Reception";
+    // See DoctorWindow for why this is preferred-* rather than a
+    // pinned width/height (which froze the window at a fixed size).
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 520px;
+    background: ThymePalette.background;
+
+    in property <string> user-display-name: "";
+    in property <string> connection-status-text: "Connected";
+    in property <ThymeChipTone> connection-status-tone: ThymeChipTone.success;
+
+    in-out property <int> selected-nav-index: 0;
+
+    in-out property <string> search-query: "";
+    in property <[PatientRow]> search-results: [];
+    in property <bool> search-busy: false;
+    in property <string> search-error-text: "";
+    in property <string> selected-patient-id: "";
+
+    in property <bool> show-create-form: false;
+    in-out property <string> create-legal-name: "";
+    in-out property <string> create-preferred-name: "";
+    in-out property <string> create-birth-date: "";
+    in-out property <string> create-sex: "";
+    in-out property <string> create-phone: "";
+    in property <bool> create-busy: false;
+    in property <string> create-error-text: "";
+
+    in property <[QueueEntryRow]> queue-entries: [];
+    in-out property <string> queue-note: "";
+    in property <bool> queue-register-busy: false;
+    in property <string> queue-register-error-text: "";
+    callback queue-register-requested(string, string);
+
+    // FIXED: Slint functions do not support iterating over arrays.
+    // Converted to an `in property` bound from the host application.
+    in property <string> status-for-selected: "";
+
+    in-out property <bool> show-settings: false;
+    in-out property <float> settings-mic-gain: 1.0;
+    in-out property <bool> settings-confirm-sign-out: false;
+    in property <string> settings-error-text: "";
+    callback settings-requested();
+    callback settings-saved();
+    callback settings-cancelled();
+
+    in-out property <bool> show-sign-out-confirm: false;
+    callback sign-out-confirmed();
+    callback sign-out-cancelled();
+
+    callback search-edited(string);
+    callback patient-selected(string);
+    callback create-patient-requested(string);
+    callback create-submitted();
+    callback create-cancelled();
+    callback sign-out();
+
+    Rectangle {
+        VerticalLayout {
+
+            ThymeHeader {
+                user-display-name: root.user-display-name;
+                connection-status-text: root.connection-status-text;
+                connection-status-tone: root.connection-status-tone;
+                section-label: "Reception";
+                sign-out => { root.sign-out(); }
+                settings-requested => { root.settings-requested(); }
+            }
+
+            HorizontalLayout {
+                vertical-stretch: 1;
+
+                ThymeSidebar {
+                    items: [
+                        { label: "Patients", enabled: true },
+                        { label: "Queue", enabled: true },
+                        { label: "Schedule", enabled: false },
+                        { label: "Documents", enabled: false },
+                    ];
+                    selected-index: root.selected-nav-index;
+                    item-selected(index) => { root.selected-nav-index = index; }
+                }
+
+                if root.selected-nav-index == 0: PatientSearchView {
+                    horizontal-stretch: 1;
+                    search-query <=> root.search-query;
+                    results: root.search-results;
+                    searching: root.search-busy;
+                    error-text: root.search-error-text;
+                    selected-patient-id: root.selected-patient-id;
+                    
+                    // FIXED: Removed invalid method call. Replaced with direct property binding.
+                    queue-status-for-selected: root.status-for-selected;
+                    
+                    queue-note <=> root.queue-note;
+                    queue-register-busy: root.queue-register-busy;
+                    queue-register-error-text: root.queue-register-error-text;
+                    search-edited(query) => { root.search-edited(query); }
+                    patient-selected(id) => { root.patient-selected(id); }
+                    create-patient-requested(query) => { root.create-patient-requested(query); }
+                    queue-register-requested(patient-id, note) => { root.queue-register-requested(patient-id, note); }
+                }
+
+                if root.selected-nav-index == 1: Rectangle {
+                    horizontal-stretch: 1;
+                    background: ThymePalette.background;
+
+                    VerticalLayout {
+                        padding: ThymeSpace.xl;
+                        spacing: ThymeSpace.lg;
+
+                        Text {
+                            text: "Today's queue";
+                            font-size: ThymeType.size-lg;
+                            font-weight: 700;
+                            color: ThymePalette.text-primary;
+                        }
+
+                        if root.queue-entries.length == 0: Text {
+                            text: "No patients currently registered for the doctor.";
+                            color: ThymePalette.text-secondary;
+                            font-size: ThymeType.size-md;
+                        }
+
+                        if root.queue-entries.length > 0: Flickable {
+                            vertical-stretch: 1;
+
+                            VerticalLayout {
+                                spacing: ThymeSpace.sm;
+
+                                for entry in root.queue-entries: QueueEntryCard {
+                                    entry: entry;
+                                    show-action: false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.show-create-form: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea {}
+
+            overlay-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.create-cancelled();
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        PatientCreateForm {
+                            width: 460px;
+                            legal-name <=> root.create-legal-name;
+                            preferred-name <=> root.create-preferred-name;
+                            birth-date <=> root.create-birth-date;
+                            sex <=> root.create-sex;
+                            phone <=> root.create-phone;
+                            busy: root.create-busy;
+                            error-text: root.create-error-text;
+                            create-requested => { root.create-submitted(); }
+                            cancelled => { root.create-cancelled(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.show-settings: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea {}
+
+            settings-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.settings-cancelled();
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                // See DoctorWindow's settings overlay for why this uses
+                // floor()'d explicit positioning instead of nested
+                // `alignment: center` layouts (sub-pixel blur fix).
+                ThymeSettingsPanel {
+                    width: 420px;
+                    x: ((parent.width - self.width) / 2);
+                    y: ((parent.height - self.height) / 2);
+                    mic-gain <=> root.settings-mic-gain;
+                    confirm-before-sign-out <=> root.settings-confirm-sign-out;
+                    show-mic-gain: false;
+                    error-text: root.settings-error-text;
+                    saved => { root.settings-saved(); }
+                    cancelled => { root.settings-cancelled(); }
+                }
+            }
+        }
+
+        if root.show-sign-out-confirm: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea {}
+
+            confirm-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.sign-out-cancelled();
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        ThymeConfirmDialog {
+                            width: 360px;
+                            title: "Sign out?";
+                            message: "You'll need to sign in again to continue.";
+                            confirm-label: "Sign out";
+                            cancel-label: "Stay signed in";
+                            danger: true;
+                            confirmed => { root.sign-out-confirmed(); }
+                            cancelled => { root.sign-out-cancelled(); }
+                        }
+                    }
+                }
+
+                init => {
+                    confirm-scope.focus();
+                }
+            }
+        }
+    }
+}

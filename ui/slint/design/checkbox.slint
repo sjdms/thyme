@@ -1,0 +1,54 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "tokens.slint";
+
+// ThymeCheckbox — labeled boolean toggle, used by the global settings
+// panel (design/settings-panel.slint). Like every other control in
+// design/, this is hand-rolled from the shared tokens rather than a
+// std-widgets checkbox, so it stays visually consistent with
+// ThymeButton/ThymeTextField.
+export component ThymeCheckbox inherits Rectangle {
+    in property <string> label: "";
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+
+    height: 22px;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.checked = !root.checked; }
+    }
+
+    HorizontalLayout {
+        spacing: ThymeSpace.sm;
+        alignment: start;
+
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: (parent.height - self.height) / 2;
+            border-radius: ThymeRadius.sm;
+            border-width: 1px;
+            border-color: root.checked ? ThymePalette.accent : ThymePalette.border;
+            background: !root.enabled ? ThymePalette.surface-muted
+                : root.checked ? ThymePalette.accent
+                : ThymePalette.surface;
+
+            if root.checked: Text {
+                text: "✓";
+                color: ThymePalette.text-inverted;
+                font-size: ThymeType.size-sm;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        Text {
+            text: root.label;
+            font-size: ThymeType.size-md;
+            color: root.enabled ? ThymePalette.text-primary : ThymePalette.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+}

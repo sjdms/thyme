@@ -1,0 +1,26 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+build = "src/build.rs"
+
+[dependencies]
+tokio = { workspace = true }
+slint = { workspace = true }
+thiserror = { workspace = true }
+argon2 = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+
+packets = { path = "../common/packets" }
+packet-datatypes = { path = "../common/packets/data" }
+auth = { path = "../common/auth" }
+domain = { path = "../common/domain" }
+
+cpal = "0.18.2"
+hound = "3.5.1"
+tempfile = "3.16.0"
+serde_json = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true }

@@ -1,0 +1,157 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "design/tokens.slint";
+import { ThymeCard } from "design/card.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
+import { ThymeTextField } from "design/text-field.slint";
+import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
+
+export struct LoginUserOption {
+    username: string,
+    display-name: string,
+}
+
+// LoginWindow — standalone sign-in window. This is not a screen inside
+// the main app shell: it is its own top-level `Window`, and the caller
+// (`controllers::login`) closes it and opens the role-appropriate
+// dashboard window once authentication succeeds, rather than switching
+// between screens inside one window.
+//
+// THYME_UI_SPEC.md doesn't prescribe exact login visuals, but §52
+// "Dialog rules" and §79 "No hidden state" still apply here: connection
+// and authentication status must always be visible, never only implied
+// by a spinner.
+export component LoginWindow inherits Window {
+    title: "Thyme — Sign in";
+    // See DoctorWindow for why this is preferred-* rather than a
+    // pinned width/height.
+    preferred-width: 420px;
+    preferred-height: 560px;
+    min-width: 360px;
+    min-height: 480px;
+    background: ThymePalette.background;
+
+    in property <bool> login-busy: false;
+    in property <string> login-error-text: "";
+    in property <string> login-connection-status-text: "Connecting…";
+    in property <ThymeChipTone> login-connection-status-tone: ThymeChipTone.neutral;
+    in property <[LoginUserOption]> login-available-users: [];
+    in-out property <string> login-selected-username: "";
+    in-out property <string> login-password: "";
+
+    callback login-requested(string, string);
+    callback retry-connection();
+
+    property <bool> can-submit: root.login-selected-username != ""
+        && root.login-password != ""
+        && !root.login-busy
+        && root.login-connection-status-tone != ThymeChipTone.danger;
+
+    VerticalLayout {
+        padding: ThymeSpace.xxl;
+        alignment: center;
+
+        ThymeCard {
+            VerticalLayout {
+                padding: ThymeSpace.xl;
+                spacing: ThymeSpace.lg;
+
+                VerticalLayout {
+                    spacing: ThymeSpace.xs;
+
+                    Text {
+                        text: "Thyme";
+                        font-size: ThymeType.size-xl;
+                        font-weight: 700;
+                        color: ThymePalette.accent;
+                    }
+
+                    Text {
+                        text: "Sign in to continue";
+                        font-size: ThymeType.size-sm;
+                        color: ThymePalette.text-secondary;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    ThymeStatusChip {
+                        text: root.login-connection-status-text;
+                        tone: root.login-connection-status-tone;
+                    }
+
+                    if root.login-connection-status-tone == ThymeChipTone.danger: ThymeButton {
+                        text: "Retry";
+                        kind: ThymeButtonKind.ghost;
+                        width: 84px;
+                        clicked => { root.retry-connection(); }
+                    }
+                }
+
+                if root.login-available-users.length > 0: VerticalLayout {
+                    spacing: ThymeSpace.xs;
+
+                    Text {
+                        text: "Account";
+                        font-size: ThymeType.size-sm;
+                        color: ThymePalette.text-secondary;
+                    }
+
+                    for user in root.login-available-users: Rectangle {
+                        height: 36px;
+                        border-radius: ThymeRadius.sm;
+                        background: user.username == root.login-selected-username ? ThymePalette.success-surface
+                            : user-touch.has-hover ? ThymePalette.surface-muted
+                            : ThymePalette.surface;
+                        border-width: 1px;
+                        border-color: user.username == root.login-selected-username ? ThymePalette.success : ThymePalette.border;
+
+                        user-touch := TouchArea {
+                            clicked => { root.login-selected-username = user.username; }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: ThymeSpace.md;
+                            padding-right: ThymeSpace.md;
+                            alignment: start;
+
+                            Text {
+                                text: user.display-name;
+                                font-size: ThymeType.size-md;
+                                color: ThymePalette.text-primary;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                ThymeTextField {
+                    label: "Password";
+                    placeholder: "Enter your password";
+                    is-password: true;
+                    enabled: !root.login-busy;
+                    text <=> root.login-password;
+                    accepted => {
+                        if (root.can-submit) {
+                            root.login-requested(root.login-selected-username, root.login-password);
+                        }
+                    }
+                }
+
+                if root.login-error-text != "": Text {
+                    text: root.login-error-text;
+                    color: ThymePalette.danger;
+                    font-size: ThymeType.size-sm;
+                    wrap: word-wrap;
+                }
+
+                ThymeButton {
+                    text: "Sign in";
+                    kind: ThymeButtonKind.primary;
+                    enabled: root.can-submit;
+                    busy: root.login-busy;
+                    clicked => { root.login-requested(root.login-selected-username, root.login-password); }
+                }
+            }
+        }
+    }
+}

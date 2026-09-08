@@ -1,0 +1,56 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "design/tokens.slint";
+
+// PatientRow — a UI-only projection of a patient search result: the
+// fields THYME_UI_SPEC.md §7 "Patient search" recommends showing in a
+// result row, pre-formatted into `detail-line` in Rust (see
+// `controllers::receptionist`) so this component stays free of
+// date/locale formatting logic (§66 Localization treats formatting as
+// presentation, not something UI markup should own).
+export struct PatientRow {
+    patient-id: string,
+    legal-name: string,
+    detail-line: string,
+}
+
+// PatientResultRow — a single row in the patient search results list.
+export component PatientResultRow inherits Rectangle {
+    in property <PatientRow> patient: { patient-id: "", legal-name: "", detail-line: "" };
+    in property <bool> selected: false;
+    callback selected-changed();
+
+    height: 60px;
+    border-radius: ThymeRadius.sm;
+    background: root.selected ? ThymePalette.success-surface
+        : touch.has-hover ? ThymePalette.surface-muted
+        : ThymePalette.surface;
+    border-width: 1px;
+    border-color: root.selected ? ThymePalette.success : ThymePalette.border;
+
+    touch := TouchArea {
+        clicked => { root.selected-changed(); }
+    }
+
+    HorizontalLayout {
+        padding-left: ThymeSpace.lg;
+        padding-right: ThymeSpace.lg;
+        alignment: start;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: ThymeSpace.xs;
+
+            Text {
+                text: root.patient.legal-name;
+                font-size: ThymeType.size-md;
+                font-weight: 600;
+                color: ThymePalette.text-primary;
+            }
+
+            Text {
+                text: root.patient.detail-line;
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+            }
+        }
+    }
+}

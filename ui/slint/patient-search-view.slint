@@ -1,0 +1,157 @@
+import { ThymePalette, ThymeSpace, ThymeType, ThymeRadius } from "design/tokens.slint";
+import { ThymeTextField } from "design/text-field.slint";
+import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
+import { PatientResultRow, PatientRow } from "patient-result-row.slint";
+export { PatientRow } from "patient-result-row.slint";
+
+// PatientSearchView — THYME_UI_SPEC.md §7/§8 Patient search: name / MRN /
+// identifier / phone / DOB search against server-side matching (matched
+// both exactly and fuzzily — see PatientRepository::search — so a
+// misspelled name still surfaces the right patient), with a visibly
+// distinct searching/empty/error state.
+//
+// Per §8 "Patient search safety", "Create new patient" only appears
+// once a search has actually come back with no match — never as a
+// default, dominant action ahead of evaluating results.
+export component PatientSearchView inherits Rectangle {
+    in-out property <string> search-query: "";
+    in property <[PatientRow]> results: [];
+    in property <bool> searching: false;
+    in property <string> error-text: "";
+    in property <string> selected-patient-id: "";
+
+    // "Send to doctor" — registers the selected patient into the
+    // "incoming patients" queue (THYME_UI_SPEC.md §40 "Dashboard").
+    // "" means not currently queued; "waiting"/"with_doctor" reflect
+    // an existing open entry (computed by the caller against the live
+    // queue snapshot — see `ReceptionistWindow.status-for-selected`).
+    in property <string> queue-status-for-selected: "";
+    in-out property <string> queue-note: "";
+    in property <bool> queue-register-busy: false;
+    in property <string> queue-register-error-text: "";
+
+    callback search-edited(string);
+    callback patient-selected(string);
+    callback create-patient-requested(string);
+    callback queue-register-requested(string, string);
+
+    background: ThymePalette.background;
+
+    VerticalLayout {
+        padding: ThymeSpace.xl;
+        spacing: ThymeSpace.lg;
+
+        HorizontalLayout {
+            spacing: ThymeSpace.md;
+
+            ThymeTextField {
+                horizontal-stretch: 1;
+                placeholder: "Search by name, MRN, phone, or date of birth";
+                text <=> root.search-query;
+                edited => { root.search-edited(root.search-query); }
+            }
+
+            if root.searching: ThymeStatusChip {
+                text: "Searching…";
+                tone: ThymeChipTone.info;
+            }
+        }
+
+        if root.error-text != "": ThymeStatusChip {
+            text: root.error-text;
+            tone: ThymeChipTone.danger;
+        }
+
+        if root.search-query == "": Text {
+            text: "Search for a patient by name, MRN, phone number, or date of birth.";
+            color: ThymePalette.text-secondary;
+            font-size: ThymeType.size-md;
+        }
+
+        if root.search-query != "" && !root.searching && root.results.length == 0 && root.error-text == "": VerticalLayout {
+            spacing: ThymeSpace.md;
+
+            Text {
+                text: "No patients found for \"" + root.search-query + "\".";
+                color: ThymePalette.text-secondary;
+                font-size: ThymeType.size-md;
+            }
+
+            HorizontalLayout {
+                alignment: start;
+
+                ThymeButton {
+                    text: "Create new patient";
+                    kind: ThymeButtonKind.secondary;
+                    width: 176px;
+                    clicked => { root.create-patient-requested(root.search-query); }
+                }
+            }
+        }
+
+        if root.results.length > 0: Flickable {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                spacing: ThymeSpace.sm;
+
+                for row in root.results: PatientResultRow {
+                    patient: row;
+                    selected: row.patient-id == root.selected-patient-id;
+                    selected-changed => { root.patient-selected(row.patient-id); }
+                }
+            }
+        }
+
+        if root.selected-patient-id != "": Rectangle {
+            background: ThymePalette.surface;
+            border-radius: ThymeRadius.md;
+            border-width: 1px;
+            border-color: ThymePalette.border;
+
+            HorizontalLayout {
+                padding: ThymeSpace.lg;
+                spacing: ThymeSpace.md;
+                alignment: space-between;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: ThymeSpace.xs;
+                    alignment: center;
+
+                    if root.queue-status-for-selected == "": ThymeTextField {
+                        placeholder: "Note for the doctor (optional)";
+                        text <=> root.queue-note;
+                        enabled: !root.queue-register-busy;
+                        accepted => { root.queue-register-requested(root.selected-patient-id, root.queue-note); }
+                    }
+
+                    if root.queue-status-for-selected == "waiting": ThymeStatusChip {
+                        text: "Already in queue — waiting";
+                        tone: ThymeChipTone.warning;
+                    }
+
+                    if root.queue-status-for-selected == "with_doctor": ThymeStatusChip {
+                        text: "Already with the doctor";
+                        tone: ThymeChipTone.info;
+                    }
+
+                    if root.queue-register-error-text != "": ThymeStatusChip {
+                        text: root.queue-register-error-text;
+                        tone: ThymeChipTone.danger;
+                    }
+                }
+
+                if root.queue-status-for-selected == "": ThymeButton {
+                    text: "Send to doctor";
+                    kind: ThymeButtonKind.primary;
+                    width: 160px;
+                    busy: root.queue-register-busy;
+                    enabled: !root.queue-register-busy;
+                    clicked => { root.queue-register-requested(root.selected-patient-id, root.queue-note); }
+                }
+            }
+        }
+    }
+}

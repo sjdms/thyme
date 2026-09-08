@@ -1,0 +1,18 @@
+// app.slint — aggregator only. It exists so `slint-build`/
+// `slint::include_modules!()` has a single compilation root, but it
+// intentionally contains no markup of its own: Thyme's UI is a set of
+// standalone, independently-ownable window components (see
+// `login-window.slint`, `receptionist-window.slint`) plus the shared
+// `design/` primitives they're built from, not one monolithic window
+// with internal screens.
+//
+// Add a new top-level window or a type Rust needs to see here; keep the
+// window's own layout and behavior in its own file.
+
+export { LoginWindow, LoginUserOption } from "login-window.slint";
+export { ReceptionistWindow, PatientRow } from "receptionist-window.slint";
+export { DoctorWindow } from "doctor-window.slint";
+export { QueueEntryRow } from "queue-entry-row.slint";
+export { SuggestionRow } from "suggestion-row.slint";
+export { HistoryEntryRow, PatientFileData } from "patient-file-view.slint";
+export { ThymeChipTone } from "design/status-chip.slint";

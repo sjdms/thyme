@@ -1,0 +1,19 @@
+import { ThymePalette, ThymeRadius } from "tokens.slint";
+
+// ThymeCard — elevated surface for standalone content (e.g. the login
+// form). ThymePanel is the flatter, non-elevated variant used for
+// grouping content inside a workspace (e.g. a dashboard tile).
+export component ThymeCard inherits Rectangle {
+    background: ThymePalette.surface;
+    border-radius: ThymeRadius.lg;
+    border-width: 1px;
+    border-color: ThymePalette.border;
+    drop-shadow-color: #00000014;
+    drop-shadow-blur: 16px;
+    drop-shadow-offset-y: 3px;
+}
+
+export component ThymePanel inherits Rectangle {
+    background: ThymePalette.surface-muted;
+    border-radius: ThymeRadius.md;
+}

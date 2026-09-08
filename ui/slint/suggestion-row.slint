@@ -1,0 +1,186 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "design/tokens.slint";
+import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
+import { ThymeTextField } from "design/text-field.slint";
+
+// SuggestionRow — a UI-only projection of one AI-suggested chart action
+// (transport type: `packets::ai::SuggestedActionRecord`). Pre-formatted
+// in Rust (`services::ai_service::to_suggestion_rows`) the same way
+// `QueueEntryRow` is for queue entries, so this file stays free of any
+// per-action-type formatting logic — every suggestion, regardless of
+// which `domain::action::ThymeAction` variant produced it, is just a
+// description plus a status here.
+export struct SuggestionRow {
+    suggestion-id: string,
+    // e.g. "AddDiagnosis" — see `domain::action::ThymeAction::action_type`.
+    action-type: string,
+    // Human-readable summary — see `domain::action::ThymeAction::describe`.
+    description: string,
+    // "pending" | "needs_clarification" | "applied" | "rejected" —
+    // mirrors `ai_suggested_actions.status`. "applied" covers both a
+    // clinician's explicit accept *and* the narrow set of low-risk
+    // actions the server auto-applies immediately (see
+    // `domain::action::ThymeAction::auto_apply`) — this card doesn't
+    // distinguish the two, since either way it's already on the chart.
+    status: string,
+    status-label: string,
+    // The rest are only populated when status == "needs_clarification"
+    // — see `domain::action::Clarification`.
+    clarification-message: string,
+    // "single_choice" | "text" | "".
+    clarification-answer-type: string,
+    clarification-choices: [string],
+}
+
+// ThymeSuggestionCard — one row of the "Suggested chart updates" panel
+// in `DoctorWindow`. Only a still-`"pending"` suggestion shows
+// Accept/Reject buttons; `"applied"`/`"rejected"` render as a settled
+// fact with no further action available, per THYME_PROJECT_DEFINITION.md
+// §44 "AI policy" — there's deliberately no "undo" here, only reject
+// (before acceptance) or a manual chart correction afterward.
+//
+// A `"needs_clarification"` suggestion instead shows the model's
+// question (`Clarification::message`) and a way to answer it — a row of
+// buttons for `Clarification::choices` when `clarification-answer-type`
+// is `"single_choice"`, always a free-text field (also used for
+// `"text"`), and a mic button that lets the clinician dictate the
+// answer instead of typing it (wired to the same recorder/STT pipeline
+// as the main Ctrl+R transcript — see `controllers::doctor`). No
+// Accept/Dismiss here: those only make sense once the guess has been
+// resolved into an ordinary, fully-specified action.
+export component ThymeSuggestionCard inherits Rectangle {
+    in property <SuggestionRow> suggestion: {
+        suggestion-id: "", action-type: "", description: "", status: "pending", status-label: "",
+        clarification-message: "", clarification-answer-type: "", clarification-choices: [],
+    };
+    // Whether this card's suggestion is the one currently being
+    // answered by voice — driven from Rust (`DoctorController`'s
+    // recording-target state), since only one recording can be active
+    // at a time across the whole window.
+    in property <bool> voice-answer-active: false;
+    callback accept-clicked();
+    callback reject-clicked();
+    // Sent with whichever choice button was clicked, or with the
+    // free-text field's contents on submit.
+    callback answer-submitted(string);
+    // Toggles voice recording for this suggestion's answer on/off.
+    callback voice-answer-toggled();
+
+    in-out property <string> draft-answer: "";
+
+    property <bool> is-pending: root.suggestion.status == "pending";
+    property <bool> needs-clarification: root.suggestion.status == "needs_clarification";
+    property <ThymeChipTone> tone: root.suggestion.status == "applied" ? ThymeChipTone.success
+        : root.suggestion.status == "rejected" ? ThymeChipTone.neutral
+        : root.needs-clarification ? ThymeChipTone.info
+        : ThymeChipTone.warning;
+
+    min-height: 56px;
+    border-radius: ThymeRadius.sm;
+    background: ThymePalette.surface;
+    border-width: 1px;
+    border-color: ThymePalette.border;
+
+    VerticalLayout {
+        padding: ThymeSpace.md;
+        spacing: ThymeSpace.sm;
+
+        HorizontalLayout {
+            alignment: space-between;
+            spacing: ThymeSpace.sm;
+
+            ThymeStatusChip {
+                text: root.suggestion.status-label;
+                tone: root.tone;
+            }
+        }
+
+        Text {
+            text: root.suggestion.description;
+            font-size: ThymeType.size-sm;
+            color: ThymePalette.text-primary;
+            wrap: word-wrap;
+        }
+
+        if root.is-pending: HorizontalLayout {
+            spacing: ThymeSpace.sm;
+
+            ThymeButton {
+                text: "Accept";
+                kind: ThymeButtonKind.primary;
+                height: 30px;
+                clicked => { root.accept-clicked(); }
+            }
+
+            ThymeButton {
+                text: "Dismiss";
+                kind: ThymeButtonKind.ghost;
+                height: 30px;
+                clicked => { root.reject-clicked(); }
+            }
+        }
+
+        if root.needs-clarification: VerticalLayout {
+            spacing: ThymeSpace.sm;
+
+            Rectangle {
+                height: 1px;
+                background: ThymePalette.border;
+            }
+
+            Text {
+                text: root.suggestion.clarification-message;
+                font-size: ThymeType.size-sm;
+                font-weight: 600;
+                color: ThymePalette.text-primary;
+                wrap: word-wrap;
+            }
+
+            if root.suggestion.clarification-answer-type == "single_choice": HorizontalLayout {
+                spacing: ThymeSpace.sm;
+
+                for choice in root.suggestion.clarification-choices: ThymeButton {
+                    text: choice;
+                    kind: ThymeButtonKind.secondary;
+                    height: 30px;
+                    clicked => { root.answer-submitted(choice); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: ThymeSpace.sm;
+
+                ThymeTextField {
+                    horizontal-stretch: 1;
+                    placeholder: root.voice-answer-active ? "Listening…" : "Type an answer…";
+                    enabled: !root.voice-answer-active;
+                    text <=> root.draft-answer;
+                    accepted => {
+                        if root.draft-answer != "" {
+                            root.answer-submitted(root.draft-answer);
+                            root.draft-answer = "";
+                        }
+                    }
+                }
+
+                ThymeButton {
+                    text: root.voice-answer-active ? "⏹ Stop" : "🎙 Answer by voice";
+                    kind: root.voice-answer-active ? ThymeButtonKind.danger : ThymeButtonKind.secondary;
+                    height: 38px;
+                    clicked => { root.voice-answer-toggled(); }
+                }
+
+                ThymeButton {
+                    text: "Submit";
+                    kind: ThymeButtonKind.primary;
+                    height: 38px;
+                    enabled: root.draft-answer != "" && !root.voice-answer-active;
+                    clicked => {
+                        root.answer-submitted(root.draft-answer);
+                        root.draft-answer = "";
+                    }
+                }
+            }
+        }
+    }
+}

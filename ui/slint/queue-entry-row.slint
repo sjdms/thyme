@@ -1,0 +1,100 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "design/tokens.slint";
+import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
+
+// QueueEntryRow — a UI-only projection of one "incoming patients" queue
+// row (transport type: `packets::queue::QueueEntryRecord`;
+// THYME_UI_SPEC.md §40 "Dashboard"). Pre-formatted in Rust
+// (`services::queue_service::to_queue_rows`) the same way `PatientRow`
+// is for search results, so this file stays free of date/locale
+// formatting logic.
+export struct QueueEntryRow {
+    queue-id: string,
+    patient-id: string,
+    patient-name: string,
+    detail-line: string,
+    // "waiting" | "with_doctor" | "done" — see
+    // `server::db::queue_repository`.
+    status: string,
+    status-label: string,
+    note: string,
+    registered-by: string,
+    time-label: string,
+}
+
+// QueueEntryCard — one row of the incoming-patients list, shared by
+// `DoctorWindow`'s dashboard (actionable — advances status) and
+// `ReceptionistWindow`'s Queue tab (read-only).
+export component QueueEntryCard inherits Rectangle {
+    in property <QueueEntryRow> entry: {
+        queue-id: "", patient-id: "", patient-name: "", detail-line: "",
+        status: "", status-label: "", note: "", registered-by: "", time-label: "",
+    };
+    in property <bool> show-action: false;
+    in property <string> action-label: "";
+    callback action-clicked();
+
+    property <ThymeChipTone> tone: root.entry.status == "with_doctor" ? ThymeChipTone.info
+        : root.entry.status == "done" ? ThymeChipTone.success
+        : ThymeChipTone.warning;
+
+    min-height: 72px;
+    border-radius: ThymeRadius.sm;
+    background: ThymePalette.surface;
+    border-width: 1px;
+    border-color: ThymePalette.border;
+
+    HorizontalLayout {
+        padding: ThymeSpace.lg;
+        spacing: ThymeSpace.md;
+        alignment: space-between;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: ThymeSpace.xs;
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: ThymeSpace.sm;
+
+                Text {
+                    text: root.entry.patient-name;
+                    font-size: ThymeType.size-md;
+                    font-weight: 600;
+                    color: ThymePalette.text-primary;
+                }
+
+                ThymeStatusChip {
+                    text: root.entry.status-label;
+                    tone: root.tone;
+                }
+            }
+
+            if root.entry.detail-line != "": Text {
+                text: root.entry.detail-line;
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+            }
+
+            if root.entry.note != "": Text {
+                text: "Note: " + root.entry.note;
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: "Registered by " + root.entry.registered-by + " • " + root.entry.time-label;
+                font-size: ThymeType.size-xs;
+                color: ThymePalette.text-secondary;
+            }
+        }
+
+        if root.show-action: ThymeButton {
+            text: root.action-label;
+            kind: ThymeButtonKind.primary;
+            width: 120px;
+            clicked => { root.action-clicked(); }
+        }
+    }
+}

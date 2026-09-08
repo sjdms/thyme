@@ -1,0 +1,127 @@
+import { ThymePalette, ThymeSpace, ThymeType, ThymeRadius } from "tokens.slint";
+import { ThymeStatusChip, ThymeChipTone } from "status-chip.slint";
+import { ThymeButton, ThymeButtonKind } from "button.slint";
+
+// ThymeHeader — persistent top bar for a role dashboard: brand mark,
+// which dashboard this window is, connectivity status and the
+// signed-in user. Connectivity is always rendered through a
+// `ThymeStatusChip` rather than only implied by a disabled control,
+// per THYME_UI_SPEC.md §46 "Offline status" — degraded connectivity
+// must never be silently hidden.
+export component ThymeHeader inherits Rectangle {
+    in property <string> user-display-name: "";
+    in property <string> connection-status-text: "Connected";
+    in property <ThymeChipTone> connection-status-tone: ThymeChipTone.success;
+    // Which dashboard this is ("Doctor", "Reception", ...). Optional —
+    // leave it unset and the second line just doesn't render — but
+    // every window embedding ThymeHeader should set it: with several
+    // role windows able to be open side by side, "Thyme" alone never
+    // told you which one you were looking at.
+    in property <string> section-label: "";
+    callback sign-out();
+    callback settings-requested();
+
+    in property <bool> compact: false;
+
+    height: 60px;
+    background: ThymePalette.surface;
+
+    // Bottom-only divider. A uniform border-width would outline all
+    // four sides of the bar (including the top/left/right window
+    // edges), which reads as a boxed-in frame rather than a top bar.
+    bottom-line := Rectangle {
+        y: parent.height - self.height;
+        height: 1px;
+        background: ThymePalette.border;
+    }
+
+    HorizontalLayout {
+        padding-left: ThymeSpace.xl;
+        padding-right: ThymeSpace.xl;
+        spacing: ThymeSpace.lg;
+        alignment: space-between;
+
+        // Brand + section: a small accent tile gives the bar an
+        // anchor instead of bare floating text, and the section
+        // label says which role dashboard this actually is.
+        HorizontalLayout {
+            spacing: ThymeSpace.sm;
+            alignment: start;
+
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                y: (parent.height - self.height) / 2;
+                border-radius: ThymeRadius.sm;
+                background: ThymePalette.accent;
+
+                Text {
+                    text: "T";
+                    font-size: ThymeType.size-md;
+                    font-weight: 700;
+                    color: ThymePalette.surface;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+
+                Text {
+                    text: "Thyme";
+                    font-size: ThymeType.size-lg;
+                    font-weight: 700;
+                    color: ThymePalette.text-primary;
+                }
+
+                if root.section-label != "": Text {
+                    text: root.section-label;
+                    font-size: ThymeType.size-xs;
+                    color: ThymePalette.text-secondary;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: ThymeSpace.md;
+            alignment: end;
+
+            ThymeStatusChip {
+                text: root.connection-status-text;
+                tone: root.connection-status-tone;
+            }
+
+            // Separates "system state" (the chip) from "who's signed
+            // in and what they can do" so the bar reads as two
+            // grouped clusters, not one flat row of controls.
+            Rectangle {
+                width: 1px;
+                y: ThymeSpace.sm;
+                height: parent.height - 2 * ThymeSpace.sm;
+                background: ThymePalette.border;
+            }
+
+            if !root.compact: Text {
+                text: root.user-display-name;
+                font-size: ThymeType.size-md;
+                color: ThymePalette.text-primary;
+                vertical-alignment: center;
+            }
+
+            ThymeButton {
+                text: "Settings";
+                kind: ThymeButtonKind.ghost;
+                width: 96px;
+                clicked => { root.settings-requested(); }
+            }
+
+            ThymeButton {
+                text: "Sign out";
+                kind: ThymeButtonKind.ghost;
+                width: 96px;
+                clicked => { root.sign-out(); }
+            }
+        }
+    }
+}

@@ -1,0 +1,51 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "tokens.slint";
+
+export enum ThymeButtonKind { primary, secondary, ghost, danger }
+
+// ThymeButton — every clickable action in the app should be one of these
+// rather than a bare TouchArea, so focus, hover, disabled and busy states
+// stay consistent everywhere (THYME_UI_SPEC.md §78, component semantics).
+export component ThymeButton inherits Rectangle {
+    in property <string> text: "Button";
+    in property <ThymeButtonKind> kind: ThymeButtonKind.primary;
+    in property <bool> enabled: true;
+    in property <bool> busy: false;
+    callback clicked();
+
+    property <color> base-bg: root.kind == ThymeButtonKind.primary ? ThymePalette.accent
+        : root.kind == ThymeButtonKind.danger ? ThymePalette.danger
+        : root.kind == ThymeButtonKind.secondary ? ThymePalette.surface-muted
+        : transparent;
+    property <color> base-fg: root.kind == ThymeButtonKind.primary || root.kind == ThymeButtonKind.danger
+        ? ThymePalette.text-inverted
+        : ThymePalette.text-primary;
+
+    height: 38px;
+    border-radius: ThymeRadius.md;
+    border-width: root.kind == ThymeButtonKind.ghost || root.kind == ThymeButtonKind.secondary ? 1px : 0px;
+    border-color: ThymePalette.border;
+    background: !root.enabled ? ThymePalette.surface-muted
+        : touch.pressed ? base-bg.darker(15%)
+        : touch.has-hover ? base-bg.darker(6%)
+        : base-bg;
+
+    touch := TouchArea {
+        enabled: root.enabled && !root.busy;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        padding-left: ThymeSpace.lg;
+        padding-right: ThymeSpace.lg;
+        spacing: ThymeSpace.sm;
+
+        Text {
+            text: root.busy ? root.text + " …" : root.text;
+            color: !root.enabled ? ThymePalette.text-secondary : root.base-fg;
+            font-size: ThymeType.size-md;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}

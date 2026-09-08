@@ -1,0 +1,228 @@
+import { ThymePalette, ThymeSpace, ThymeRadius, ThymeType } from "design/tokens.slint";
+import { ThymeCard } from "design/card.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
+import { ThymeTextField } from "design/text-field.slint";
+
+// PatientCreateForm — the form THYME_UI_SPEC.md §8 describes as the last
+// step of `Search → Candidate results → "No match" confirmation →
+// Create`. It doesn't gate its own visibility: the caller
+// (`ReceptionistWindow`) only shows it after `PatientSearchView`'s
+// no-match state has fired `create-patient-requested`, which is itself
+// only reachable once a search has actually come back empty.
+//
+// Per THYME_UI_SPEC.md §53 "Forms", fields are grouped by meaning
+// ("Identity" / "Contact") rather than presented as one flat list, and
+// per §42 "Keyboard data-entry strategy" Enter moves through the fields
+// in reading order and submits from the last one, so the whole form is
+// usable without touching the mouse.
+//
+// Sex is a small fixed set of chips rather than free text so the value
+// stays a controlled vocabulary, in the same spirit as the structured
+// pickers §30 "Diagnosis UI" describes elsewhere in the spec.
+export component PatientCreateForm inherits ThymeCard {
+    in-out property <string> legal-name: "";
+    in-out property <string> preferred-name: "";
+    in-out property <string> birth-date: "";
+    in-out property <string> sex: "";
+    in-out property <string> phone: "";
+    in property <bool> busy: false;
+    in property <string> error-text: "";
+
+    callback create-requested();
+    callback cancelled();
+
+    property <bool> can-submit: root.legal-name != "" && !root.busy;
+
+    // Rounded corners on `ThymeCard` only clip the background/border —
+    // without this, the section divider and any field content that
+    // touches an edge would square off past the radius.
+    clip: true;
+
+    VerticalLayout {
+        // The card's own preferred height comes from this layout, so
+        // the height this form ends up with is always exactly what its
+        // content needs — see `ReceptionistWindow`'s overlay, which
+        // centers this component through nested layouts specifically so
+        // that preferred height is respected instead of being stretched
+        // to fill whatever container it's dropped into.
+        padding: ThymeSpace.xl;
+        spacing: ThymeSpace.lg;
+
+        VerticalLayout {
+            spacing: ThymeSpace.xs;
+
+            Text {
+                text: "New patient";
+                font-size: ThymeType.size-lg;
+                font-weight: 700;
+                color: ThymePalette.text-primary;
+            }
+
+            Text {
+                text: "No existing match was found — enter the patient's details below.";
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-secondary;
+                wrap: word-wrap;
+            }
+        }
+
+        VerticalLayout {
+            spacing: ThymeSpace.md;
+
+            Text {
+                text: "IDENTITY";
+                font-size: ThymeType.size-xs;
+                font-weight: 700;
+                letter-spacing: 1px;
+                color: ThymePalette.text-secondary;
+            }
+
+            legal-name-field := ThymeTextField {
+                label: "Legal name *";
+                placeholder: "Required";
+                enabled: !root.busy;
+                text <=> root.legal-name;
+                accepted => { preferred-name-field.focus-input(); }
+            }
+
+            preferred-name-field := ThymeTextField {
+                label: "Preferred name";
+                placeholder: "Optional";
+                enabled: !root.busy;
+                text <=> root.preferred-name;
+                accepted => { birth-date-field.focus-input(); }
+            }
+
+            HorizontalLayout {
+                spacing: ThymeSpace.md;
+
+                birth-date-field := ThymeTextField {
+                    horizontal-stretch: 1;
+                    label: "Date of birth";
+                    placeholder: "YYYY-MM-DD";
+                    enabled: !root.busy;
+                    text <=> root.birth-date;
+                    accepted => { phone-field.focus-input(); }
+                }
+            }
+
+            VerticalLayout {
+                spacing: ThymeSpace.xs;
+
+                Text {
+                    text: "Sex";
+                    font-size: ThymeType.size-sm;
+                    color: ThymePalette.text-secondary;
+                }
+
+                HorizontalLayout {
+                    spacing: ThymeSpace.sm;
+
+                    for option in ["female", "male", "other", "unknown"]: Rectangle {
+                        height: 34px;
+                        border-radius: ThymeRadius.sm;
+                        border-width: 1px;
+                        border-color: root.sex == option ? ThymePalette.accent : ThymePalette.border;
+                        background: root.sex == option ? ThymePalette.success-surface
+                            : option-touch.has-hover ? ThymePalette.surface-muted
+                            : ThymePalette.surface;
+
+                        option-touch := TouchArea {
+                            enabled: !root.busy;
+                            clicked => {
+                                // Clicking the already-selected chip clears
+                                // it — sex is optional, and this keeps
+                                // "unknown" reachable without a fifth
+                                // "clear" affordance.
+                                root.sex = root.sex == option ? "" : option;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: ThymeSpace.md;
+                            padding-right: ThymeSpace.md;
+                            spacing: ThymeSpace.xs;
+                            alignment: center;
+
+                            if root.sex == option: Text {
+                                text: "✓";
+                                font-size: ThymeType.size-sm;
+                                color: ThymePalette.accent;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: option;
+                                font-size: ThymeType.size-sm;
+                                font-weight: root.sex == option ? 600 : 400;
+                                color: ThymePalette.text-primary;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: ThymePalette.border;
+        }
+
+        VerticalLayout {
+            spacing: ThymeSpace.md;
+
+            Text {
+                text: "CONTACT";
+                font-size: ThymeType.size-xs;
+                font-weight: 700;
+                letter-spacing: 1px;
+                color: ThymePalette.text-secondary;
+            }
+
+            phone-field := ThymeTextField {
+                label: "Phone";
+                placeholder: "Optional";
+                enabled: !root.busy;
+                text <=> root.phone;
+                accepted => {
+                    if (root.can-submit) {
+                        root.create-requested();
+                    }
+                }
+            }
+        }
+
+        if root.error-text != "": Text {
+            text: root.error-text;
+            color: ThymePalette.danger;
+            font-size: ThymeType.size-sm;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: ThymeSpace.md;
+            alignment: end;
+
+            ThymeButton {
+                text: "Cancel";
+                kind: ThymeButtonKind.ghost;
+                width: 96px;
+                enabled: !root.busy;
+                clicked => { root.cancelled(); }
+            }
+
+            ThymeButton {
+                text: "Create patient";
+                kind: ThymeButtonKind.primary;
+                enabled: root.can-submit;
+                busy: root.busy;
+                clicked => { root.create-requested(); }
+            }
+        }
+    }
+
+    init => {
+        legal-name-field.focus-input();
+    }
+}

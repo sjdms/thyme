@@ -1,0 +1,59 @@
+import { ThymePalette, ThymeSpace, ThymeType } from "tokens.slint";
+import { ThymeCard } from "card.slint";
+import { ThymeButton, ThymeButtonKind } from "button.slint";
+
+// ThymeConfirmDialog — a small modal confirmation prompt
+// (THYME_UI_SPEC.md §52 "Dialog rules": a focused, single-purpose,
+// dismissable panel). Presentation only; the caller owns whether it's
+// shown and what happens on each outcome, the same way
+// `PatientCreateForm` does for the create-patient flow. First used by
+// the "confirm before sign out" setting (design/settings-panel.slint).
+export component ThymeConfirmDialog inherits ThymeCard {
+    in property <string> title: "Are you sure?";
+    in property <string> message: "";
+    in property <string> confirm-label: "Confirm";
+    in property <string> cancel-label: "Cancel";
+    in property <bool> danger: false;
+
+    callback confirmed();
+    callback cancelled();
+
+    clip: true;
+
+    VerticalLayout {
+        padding: ThymeSpace.xl;
+        spacing: ThymeSpace.lg;
+
+        Text {
+            text: root.title;
+            font-size: ThymeType.size-lg;
+            font-weight: 700;
+            color: ThymePalette.text-primary;
+        }
+
+        if root.message != "": Text {
+            text: root.message;
+            font-size: ThymeType.size-sm;
+            color: ThymePalette.text-secondary;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: ThymeSpace.md;
+            alignment: end;
+
+            ThymeButton {
+                text: root.cancel-label;
+                kind: ThymeButtonKind.ghost;
+                width: 128px;
+                clicked => { root.cancelled(); }
+            }
+
+            ThymeButton {
+                text: root.confirm-label;
+                kind: root.danger ? ThymeButtonKind.danger : ThymeButtonKind.primary;
+                clicked => { root.confirmed(); }
+            }
+        }
+    }
+}
