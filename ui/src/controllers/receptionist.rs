@@ -8,13 +8,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::ComponentHandle;
 
 use crate::services::connection::{Connection, NewPatientInput};
 use crate::services::patient_service::{to_patient_rows, PatientSearchUpdate, PatientService};
 use crate::services::queue_service::{self, QueueService, QueueUpdate};
 use crate::services::settings_service::Settings;
-use crate::{PatientRow, ReceptionistWindow, ThymeChipTone};
+use crate::{ReceptionistWindow, ThymeChipTone};
 
 /// Owns the receptionist dashboard's patient-search state and queue
 /// service for as long as the window is open.
@@ -45,6 +45,10 @@ pub fn install(window: &ReceptionistWindow, connection: Connection) {
     // this listener actually being registered — see
     // `controllers::doctor::install`'s identical comment.
     controller.clone().listen_queue(window.as_weak());
+    // Same reasoning for the patient-search/file stream: this has to be
+    // subscribed before the default-list search fires below (or any
+    // other search), or that search's response has nowhere to land.
+    controller.clone().listen(window.as_weak());
 
     // Loads whatever this terminal last saved so the settings panel
     // (and the sign-out-confirmation check below) reflect it
@@ -57,10 +61,30 @@ pub fn install(window: &ReceptionistWindow, connection: Connection) {
         search_controller.clone().handle_search_edited(search_weak.clone(), query.to_string());
     });
 
+    // Load the default "everyone" list immediately, rather than
+    // leaving the Patients tab blank until the receptionist types
+    // something — mirrors whatever's already in `search-query` (empty
+    // on a fresh window) through the exact same path a real search
+    // uses.
+    controller.clone().handle_search_edited(window.as_weak(), window.get_search_query().to_string());
+
     let select_weak = window.as_weak();
     window.on_patient_selected(move |patient_id| {
         if let Some(window) = select_weak.upgrade() {
             window.set_selected_patient_id(patient_id);
+            // Selecting a different patient (or discarding the current
+            // selection entirely — see `PatientSearchView`'s toggle-off
+            // click) drops everything that was staged for whichever
+            // patient was selected before: the queue note typed into
+            // the "Send to doctor" panel, and any registration error
+            // still being shown from a previous attempt. Without this,
+            // switching (or discarding) selection left the old note/
+            // error sitting there, wired to whatever patient happens to
+            // be selected next rather than the one the receptionist
+            // actually typed it for.
+            window.set_queue_note("".into());
+            window.set_queue_register_error_text("".into());
+            window.set_queue_register_busy(false);
         }
     });
 
@@ -177,8 +201,6 @@ pub fn install(window: &ReceptionistWindow, connection: Connection) {
             window.set_show_sign_out_confirm(false);
         }
     });
-
-    controller.listen(window.as_weak());
 }
 
 /// Applies a loaded `Settings` to the window's bound settings-panel
@@ -206,20 +228,17 @@ fn settings_from_window(window: &ReceptionistWindow) -> Settings {
 }
 
 impl ReceptionistController {
+    /// Fires a search for whatever's in the box — including an empty
+    /// box. An empty query used to be handled entirely locally (clear
+    /// the results, never touch the server), which is exactly why the
+    /// list defaulted to blank instead of showing the patient roster;
+    /// now it's sent through like any other query, and
+    /// `PatientRepository::search` treats an empty query as "list
+    /// everyone" server-side.
     fn handle_search_edited(self: Arc<Self>, weak: slint::Weak<ReceptionistWindow>, query: String) {
-        let trimmed = query.trim();
+        let trimmed = query.trim().to_string();
 
-        if trimmed.is_empty() {
-            *self.last_sent_query.lock().unwrap() = String::new();
-            if let Some(window) = weak.upgrade() {
-                window.set_search_results(ModelRc::new(VecModel::from(Vec::<PatientRow>::new())));
-                window.set_search_busy(false);
-                window.set_search_error_text("".into());
-            }
-            return;
-        }
-
-        *self.last_sent_query.lock().unwrap() = trimmed.to_string();
+        *self.last_sent_query.lock().unwrap() = trimmed.clone();
 
         if let Some(window) = weak.upgrade() {
             window.set_search_busy(true);

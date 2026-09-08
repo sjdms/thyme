@@ -47,10 +47,15 @@ impl PatientRepository {
     ///
     /// Exact/substring hits are ranked ahead of purely-fuzzy ones via
     /// `match_score`.
+    ///
+    /// An empty (or all-whitespace) `query` isn't treated as "no
+    /// matches" — both the receptionist and doctor "Patients" search
+    /// should show the patient roster by default rather than a blank
+    /// list, so this falls through to `list_all` instead.
     pub async fn search(&self, query: &str) -> Result<Vec<PatientSearchResult>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
-            return Ok(Vec::new());
+            return self.list_all().await;
         }
         let term = format!("%{}%", trimmed);
 
@@ -101,6 +106,58 @@ impl PatientRepository {
         )
         .bind(&term)
         .bind(trimmed)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            results.push(PatientSearchResult {
+                id: row.try_get("id")?,
+                legal_name: row.try_get("legal_name")?,
+                preferred_name: row.try_get("preferred_name")?,
+                birth_date: row.try_get("birth_date")?,
+                sex: row.try_get("sex")?,
+                mrn: row.try_get("mrn")?,
+                phone: row.try_get("phone")?,
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Backs `search`'s empty-query case: every non-merged patient,
+    /// alphabetically by legal name, capped the same way a real search
+    /// is so the default list stays scannable. There's no query here to
+    /// rank by `similarity()` against, so this skips `match_score`
+    /// entirely and just orders by name — `search`'s scored query is
+    /// only used once there's an actual term to score.
+    async fn list_all(&self) -> Result<Vec<PatientSearchResult>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                p.id,
+                p.legal_name,
+                p.preferred_name,
+                p.birth_date,
+                p.sex,
+                (
+                    SELECT value FROM patient_identifiers pi
+                    WHERE pi.patient_id = p.id AND pi.identifier_type = 'MRN'
+                    ORDER BY pi.is_primary DESC, pi.created_at ASC
+                    LIMIT 1
+                ) AS mrn,
+                (
+                    SELECT value FROM patient_contacts pc
+                    WHERE pc.patient_id = p.id AND pc.type = 'phone'
+                    ORDER BY pc.preferred DESC, pc.created_at ASC
+                    LIMIT 1
+                ) AS phone
+            FROM patients p
+            WHERE p.status <> 'merged'
+            ORDER BY p.legal_name
+            LIMIT 25
+            "#,
+        )
         .fetch_all(&self.pool)
         .await?;
 

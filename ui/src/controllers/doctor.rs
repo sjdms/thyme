@@ -50,12 +50,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Default)]
 struct AiPanelState {
     transcription_id: Option<String>,
+    /// The patient this transcript's suggestions belong to (from
+    /// `AiUpdate::SuggestionsReady`) — kept alongside `transcription_id`
+    /// so that once a suggestion is actually applied (`SuggestionApplied`/
+    /// `AllApplied`/an auto-applying `ClarificationResolved`), `listen_ai`
+    /// knows whose patient file just changed server-side and needs
+    /// re-fetching, without the individual apply/resolve events having
+    /// to carry a patient id of their own.
+    patient_id: Option<String>,
     suggestions: Vec<SuggestedActionRecord>,
 }
 
 impl AiPanelState {
     fn reset(&mut self) {
         self.transcription_id = None;
+        self.patient_id = None;
         self.suggestions.clear();
     }
 
@@ -122,6 +131,13 @@ enum RecordingTarget {
 struct PatientFileTrackingState {
     last_query: String,
     last_selected_id: String,
+    /// The patient this controller most recently auto-fetched a file
+    /// for because they were `"with_doctor"` — the Dashboard tab's
+    /// "in the room now" panel, kept separate from `last_selected_id`
+    /// (the "Patients" tab's doctor-initiated search) so the two
+    /// features' fetches never clobber each other even when they
+    /// happen to be the same patient. See `listen_queue`.
+    current_patient_id: String,
 }
 
 /// Owns the doctor dashboard's recorder and in-session recordings list
@@ -174,17 +190,48 @@ struct DoctorController {
 pub fn install(window: &DoctorWindow, connection: Connection) {
     let queue_service = Rc::new(QueueService::new(connection.clone()));
 
-    // Subscribed as the very first thing `install` does, before any
-    // other setup, to minimize the window between the server's
-    // connect-time `PatientQueueSnapshot` push (server::server sends
-    // one to every client right after authentication, independent of
-    // when this controller gets around to subscribing) and this
-    // listener actually being registered — see
-    // `services::connection::Connection::subscribe`'s "events sent
-    // before subscribing are not replayed" note. A snapshot that slips
-    // through this gap is self-healing on the next queue change either
-    // way, since every push is a full snapshot, not a delta.
-    listen_queue(queue_service.clone(), window.as_weak());
+    // Created up front (rather than down with the "Patients" tab
+    // wiring below, where it used to live) because `listen_queue` now
+    // needs it too — the Dashboard tab's "patient in the room" panel
+    // fetches through the exact same `PatientService`/tracking state
+    // the "Patients" tab search uses, so the two never talk to the
+    // server through subtly different paths.
+    let patient_service = Arc::new(PatientService::new(connection.clone()));
+    let patient_tracking = Arc::new(Mutex::new(PatientFileTrackingState::default()));
+
+    // Subscribed before `listen_queue` below — and before anything else
+    // in `install` — for the same reason `listen_queue` itself wants to
+    // go early (see its call site's comment): `listen_queue`'s task can
+    // discover a `with_doctor` patient from its very first (possibly
+    // replayed) snapshot and immediately call
+    // `patient_service.request_file(...)`. `PatientService::subscribe`
+    // establishes its underlying `Connection::subscribe` synchronously,
+    // in-line, before spawning anything — so as long as this call
+    // happens first, on this same thread, the receiver that will carry
+    // that request's `PatientFileReady`/`PatientFileFailed` response is
+    // guaranteed to already exist by the time `listen_queue`'s spawned
+    // task could possibly run and fire that request, no matter how the
+    // runtime schedules the two tasks. Calling this any later leaves a
+    // real (if narrow) window on a multi-threaded runtime where that
+    // very first auto-fetched chart's response arrives with no
+    // subscriber and is silently dropped — the dashboard is then stuck
+    // on "Loading ... chart…" until the room changes again.
+    listen_patients(patient_service.clone(), patient_tracking.clone(), window.as_weak());
+
+    // Called right after `listen_patients` (see the comment above) —
+    // still early, but the exact ordering relative to the rest of
+    // `install` no longer matters for the initial `PatientQueueSnapshot`
+    // itself the way it once did: the server's connect-time push is now
+    // cached on `Connection` (`last_queue_snapshot`) and replayed to
+    // whoever calls `QueueService::subscribe`, however late. What *does*
+    // still need `listen_patients` to have already run is this
+    // function's own reaction to that snapshot — see above.
+    listen_queue(
+        queue_service.clone(),
+        patient_service.clone(),
+        patient_tracking.clone(),
+        window.as_weak(),
+    );
 
     let recorder = match AudioRecorder::new() {
         Ok(recorder) => Some(Rc::new(RefCell::new(recorder))),
@@ -224,6 +271,7 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     let ai_service = Rc::new(AiService::new(connection.clone()));
     listen_ai(
         ai_service.clone(),
+        patient_service.clone(),
         window.as_weak(),
         controller.ai_state.clone(),
     );
@@ -270,9 +318,6 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     // `controllers::receptionist`'s dashboard search rather than
     // duplicated, so both the receptionist and doctor terminals talk
     // to the server through the exact same request/formatting path.
-    let patient_service = Arc::new(PatientService::new(connection.clone()));
-    let patient_tracking = Arc::new(Mutex::new(PatientFileTrackingState::default()));
-    listen_patients(patient_service.clone(), patient_tracking.clone(), window.as_weak());
 
     let patients_search_service = patient_service.clone();
     let patients_search_tracking = patient_tracking.clone();
@@ -297,6 +342,18 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
             patient_id.to_string(),
         );
     });
+
+    // Load the default "everyone" list immediately, rather than
+    // leaving the "Patients" tab blank until the doctor types
+    // something — mirrors whatever's already in `patients-search-query`
+    // (empty on a fresh window) through the exact same path a real
+    // search uses.
+    handle_patients_search_edited(
+        &patient_service,
+        &patient_tracking,
+        &window.as_weak(),
+        window.get_patients_search_query().to_string(),
+    );
 
     apply_settings_to_window(window, &initial_settings);
 
@@ -458,7 +515,28 @@ fn settings_from_window(window: &DoctorWindow) -> Settings {
 /// `DoctorController`) so this task's `Send` future never has to carry
 /// `DoctorController`'s non-`Send` `recorder` field — it only closes
 /// over the `Rc`-free `QueueService`/`Weak<DoctorWindow>` it's handed.
-fn listen_queue(queue_service: Rc<QueueService>, weak: slint::Weak<DoctorWindow>) {
+/// What `listen_queue` should do about the Dashboard's "patient in the
+/// room" chart panel for this snapshot, decided once up front (see
+/// `listen_queue`) rather than re-derived in both places that act on
+/// it (the fetch itself, and the loading-state update).
+enum CurrentPatientFileChange {
+    /// The with-doctor patient is unchanged since the last snapshot —
+    /// nothing to do. `Snapshot` fires on every queue change (a new
+    /// registration, a *different* patient advancing), not just when
+    /// the room's occupant does, so this is the common case.
+    Unchanged,
+    /// No patient is with the doctor anymore — clear the panel.
+    Cleared,
+    /// A new patient just became `"with_doctor"` — fetch their file.
+    Patient(String),
+}
+
+fn listen_queue(
+    queue_service: Rc<QueueService>,
+    patient_service: Arc<PatientService>,
+    tracking: Arc<Mutex<PatientFileTrackingState>>,
+    weak: slint::Weak<DoctorWindow>,
+) {
     let mut updates = queue_service.subscribe();
 
     tokio::spawn(async move {
@@ -477,6 +555,24 @@ fn listen_queue(queue_service: Rc<QueueService>, weak: slint::Weak<DoctorWindow>
                     // room at a time, so the first (oldest) match is
                     // the one that matters.
                     let with_doctor = entries.iter().find(|e| e.status == "with_doctor").cloned();
+
+                    let file_change = {
+                        let mut tracked = tracking.lock().unwrap();
+                        let new_id = with_doctor
+                            .as_ref()
+                            .map(|e| e.patient_id.clone())
+                            .unwrap_or_default();
+                        if tracked.current_patient_id == new_id {
+                            CurrentPatientFileChange::Unchanged
+                        } else {
+                            tracked.current_patient_id = new_id.clone();
+                            if new_id.is_empty() {
+                                CurrentPatientFileChange::Cleared
+                            } else {
+                                CurrentPatientFileChange::Patient(new_id)
+                            }
+                        }
+                    };
 
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         window.set_queue_entries(queue_service::to_queue_rows(&entries));
@@ -498,6 +594,36 @@ fn listen_queue(queue_service: Rc<QueueService>, weak: slint::Weak<DoctorWindow>
                             }
                         }
                     });
+
+                    match file_change {
+                        CurrentPatientFileChange::Unchanged => {}
+                        CurrentPatientFileChange::Cleared => {
+                            let _ = weak.upgrade_in_event_loop(move |window| {
+                                window.set_current_patient_file_loading(false);
+                                window.set_current_patient_has_file(false);
+                                window.set_current_patient_file_error_text("".into());
+                            });
+                        }
+                        CurrentPatientFileChange::Patient(patient_id) => {
+                            let _ = weak.upgrade_in_event_loop(move |window| {
+                                window.set_current_patient_file_loading(true);
+                                window.set_current_patient_has_file(false);
+                                window.set_current_patient_file_error_text("".into());
+                            });
+                            if patient_service.request_file(patient_id).is_err() {
+                                let _ = weak.upgrade_in_event_loop(move |window| {
+                                    window.set_current_patient_file_loading(false);
+                                    window.set_current_patient_file_error_text(
+                                        "Not connected to the server.".into(),
+                                    );
+                                    window.set_connection_status_text(
+                                        "Offline — could not reach the server".into(),
+                                    );
+                                    window.set_connection_status_tone(ThymeChipTone::Danger);
+                                });
+                            }
+                        }
+                    }
                 }
                 Ok(QueueUpdate::AdvanceFailed(message)) => {
                     let _ = weak.upgrade_in_event_loop(move |window| {
@@ -535,25 +661,23 @@ fn listen_queue(queue_service: Rc<QueueService>, weak: slint::Weak<DoctorWindow>
 /// from the Slint callback, but keeping it alongside its counterpart
 /// below rather than as a controller method keeps the whole "Patients"
 /// tab's plumbing in one place.
+/// Fires a search for whatever's in the "Patients" tab's box —
+/// including an empty box. An empty query used to be handled entirely
+/// locally (clear the results, never touch the server), which is
+/// exactly why the list defaulted to blank instead of showing the
+/// patient roster; now it's sent through like any other query, and
+/// `PatientRepository::search` treats an empty query as "list
+/// everyone" server-side — mirrors
+/// `controllers::receptionist::ReceptionistController::handle_search_edited`.
 fn handle_patients_search_edited(
     patient_service: &Arc<PatientService>,
     tracking: &Arc<Mutex<PatientFileTrackingState>>,
     weak: &slint::Weak<DoctorWindow>,
     query: String,
 ) {
-    let trimmed = query.trim();
+    let trimmed = query.trim().to_string();
 
-    if trimmed.is_empty() {
-        tracking.lock().unwrap().last_query = String::new();
-        if let Some(window) = weak.upgrade() {
-            window.set_patients_search_results(patient_service::to_patient_rows(&[]));
-            window.set_patients_search_busy(false);
-            window.set_patients_search_error_text("".into());
-        }
-        return;
-    }
-
-    tracking.lock().unwrap().last_query = trimmed.to_string();
+    tracking.lock().unwrap().last_query = trimmed.clone();
 
     let Some(window) = weak.upgrade() else { return };
     window.set_patients_search_busy(true);
@@ -638,9 +762,25 @@ fn listen_patients(
                     });
                 }
                 Ok(PatientSearchUpdate::FileReady { patient, history }) => {
-                    if tracking.lock().unwrap().last_selected_id != patient.patient_id {
-                        // A different patient has since been selected;
-                        // discard this now-stale file.
+                    // A single `PatientFileResponse` can be relevant to
+                    // either or both of this controller's two file
+                    // consumers — the "Patients" tab's doctor-initiated
+                    // search (`last_selected_id`) and the Dashboard's
+                    // automatic "patient in the room" panel
+                    // (`current_patient_id`, set by `listen_queue`) —
+                    // since both request through the same
+                    // `PatientService` and neither response is tagged
+                    // with who asked for it. Checked once up front so a
+                    // response stale for both (a third patient has
+                    // since been selected/roomed) is discarded outright.
+                    let (is_selected, is_current) = {
+                        let tracked = tracking.lock().unwrap();
+                        (
+                            tracked.last_selected_id == patient.patient_id,
+                            tracked.current_patient_id == patient.patient_id,
+                        )
+                    };
+                    if !is_selected && !is_current {
                         continue;
                     }
                     // `PatientFileData` wraps `ModelRc<HistoryEntryRow>`,
@@ -655,20 +795,42 @@ fn listen_patients(
                     // constructed once we're already on the UI thread.
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         let data: PatientFileData = patient_service::to_patient_file_data(&patient, &history);
-                        window.set_patients_file_loading(false);
-                        window.set_patients_file_error_text("".into());
-                        window.set_patients_has_file(true);
-                        window.set_patients_file(data);
+                        if is_selected {
+                            window.set_patients_file_loading(false);
+                            window.set_patients_file_error_text("".into());
+                            window.set_patients_has_file(true);
+                            window.set_patients_file(data.clone());
+                        }
+                        if is_current {
+                            window.set_current_patient_file_loading(false);
+                            window.set_current_patient_file_error_text("".into());
+                            window.set_current_patient_has_file(true);
+                            window.set_current_patient_file(data);
+                        }
                     });
                 }
                 Ok(PatientSearchUpdate::FileFailed { patient_id, message }) => {
-                    if tracking.lock().unwrap().last_selected_id != patient_id {
+                    let (is_selected, is_current) = {
+                        let tracked = tracking.lock().unwrap();
+                        (
+                            tracked.last_selected_id == patient_id,
+                            tracked.current_patient_id == patient_id,
+                        )
+                    };
+                    if !is_selected && !is_current {
                         continue;
                     }
                     let _ = weak.upgrade_in_event_loop(move |window| {
-                        window.set_patients_file_loading(false);
-                        window.set_patients_has_file(false);
-                        window.set_patients_file_error_text(message.into());
+                        if is_selected {
+                            window.set_patients_file_loading(false);
+                            window.set_patients_has_file(false);
+                            window.set_patients_file_error_text(message.clone().into());
+                        }
+                        if is_current {
+                            window.set_current_patient_file_loading(false);
+                            window.set_current_patient_has_file(false);
+                            window.set_current_patient_file_error_text(message.into());
+                        }
                     });
                 }
                 Ok(PatientSearchUpdate::Created { .. }) | Ok(PatientSearchUpdate::CreateFailed { .. }) => {
@@ -704,22 +866,42 @@ fn listen_patients(
 /// `subscribe()` call returns is).
 fn listen_ai(
     ai_service: Rc<AiService>,
+    patient_service: Arc<PatientService>,
     weak: slint::Weak<DoctorWindow>,
     state: Arc<Mutex<AiPanelState>>,
 ) {
     let mut updates = ai_service.subscribe();
+
+    // Re-requests the current transcript's patient file so the
+    // Dashboard's "in the room now" panel (and the "Patients" tab, if
+    // it happens to have the same chart open) pick up whatever a just-
+    // applied suggestion changed server-side — the response comes back
+    // through the exact same `PatientSearchUpdate::FileReady` path
+    // `listen_patients` already handles, so this just has to fire the
+    // request; it doesn't need to touch the window itself.
+    let refresh_patient_file = {
+        let patient_service = patient_service.clone();
+        let state = state.clone();
+        move || {
+            let patient_id = state.lock().unwrap().patient_id.clone();
+            if let Some(patient_id) = patient_id {
+                let _ = patient_service.request_file(patient_id);
+            }
+        }
+    };
 
     tokio::spawn(async move {
         loop {
             match updates.recv().await {
                 Ok(AiUpdate::SuggestionsReady {
                     transcription_id,
-                    patient_id: _,
+                    patient_id,
                     suggestions,
                 }) => {
                     {
                         let mut state = state.lock().unwrap();
                         state.transcription_id = Some(transcription_id.clone());
+                        state.patient_id = Some(patient_id);
                         state.suggestions = suggestions;
                     }
                     let state = state.clone();
@@ -746,6 +928,7 @@ fn listen_ai(
                     {
                         state.lock().unwrap().mark_status(&suggestion_id, "applied");
                     }
+                    refresh_patient_file();
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         let state = state.lock().unwrap();
                         window
@@ -788,11 +971,21 @@ fn listen_ai(
                     status,
                 }) => {
                     let state = state.clone();
+                    // Resolving a clarification can land the action
+                    // straight on `"applied"` (`ThymeAction::auto_apply`)
+                    // instead of going back to `"pending"` for a normal
+                    // accept — that already-applied case still changed
+                    // the patient's chart server-side, so it needs the
+                    // same refresh a `SuggestionApplied` gets.
+                    let just_applied = status == "applied";
                     {
                         state
                             .lock()
                             .unwrap()
                             .resolve_clarification(&suggestion_id, description, status);
+                    }
+                    if just_applied {
+                        refresh_patient_file();
                     }
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         let state = state.lock().unwrap();
@@ -814,6 +1007,7 @@ fn listen_ai(
                 }) => {
                     let state = state.clone();
                     let any_failed = results.iter().any(|r| !r.success);
+                    let any_applied = results.iter().any(|r| r.success);
                     {
                         let mut state = state.lock().unwrap();
                         for result in &results {
@@ -821,6 +1015,9 @@ fn listen_ai(
                                 state.mark_status(&result.suggestion_id, "applied");
                             }
                         }
+                    }
+                    if any_applied {
+                        refresh_patient_file();
                     }
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         let state = state.lock().unwrap();
@@ -844,6 +1041,7 @@ fn listen_ai(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+            refresh_patient_file()
         }
     });
 }

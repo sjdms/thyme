@@ -84,7 +84,11 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
         something genuinely new to the chart.\n\
         7. Output ONLY valid JSON matching the schema given at the end of this \
         prompt. No prose, no markdown code fences, no explanation before or after \
-        the JSON — your entire response must be parseable as JSON on its own.\n\n",
+        the JSON — your entire response must be parseable as JSON on its own.\n\
+        8. Properly capitalize all clinical information throughout your entire JSON \
+        output. Every string you produce (action fields, notes, clarification messages, \
+        medication names) might be read by the user and must be formatted professionally. \
+        For example, use \"Latanoprost 0.005%\" instead of \"latanoprost 0.005%\".\n\n",
     );
 
     prompt.push_str("## Patient\n\n");
@@ -104,73 +108,102 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
     if history.is_empty() {
         prompt.push_str("No prior history on file for this patient.\n\n");
     } else {
-        push_section(&mut prompt, "Diagnoses", history.diagnoses.iter().map(|d| {
-            let mut line = format!("id:{} — {}", d.id, d.diagnosis);
-            if let Some(code) = &d.code {
-                line.push_str(&format!(" ({code})"));
-            }
-            line.push_str(&format!(" [{}]", d.status));
-            if let Some(notes) = &d.notes {
-                line.push_str(&format!(" — notes: {notes}"));
-            }
-            line
-        }));
-        push_section(&mut prompt, "Allergies", history.allergies.iter().map(|a| {
-            let mut line = a.allergen.clone();
-            if let Some(reaction) = &a.reaction {
-                line.push_str(&format!(" — reaction: {reaction}"));
-            }
-            if let Some(severity) = &a.severity {
-                line.push_str(&format!(" ({severity})"));
-            }
-            line
-        }));
-        push_section(&mut prompt, "Current/past medications", history.medications.iter().map(|m| {
-            let mut line = format!("id:{} — {}", m.id, m.name);
-            if let Some(dosage) = &m.dosage {
-                line.push_str(&format!(" {dosage}"));
-            }
-            if let Some(frequency) = &m.frequency {
-                line.push_str(&format!(", {frequency}"));
-            }
-            if let Some(instructions) = &m.instructions {
-                line.push_str(&format!(" — {instructions}"));
-            }
-            line.push_str(&format!(" [{}]", m.status));
-            if let Some(reason) = &m.discontinue_reason {
-                line.push_str(&format!(" — discontinued: {reason}"));
-            }
-            line
-        }));
-        push_section(&mut prompt, "Recent clinical notes", history.clinical_notes.iter().map(|n| n.note.clone()));
-        push_section(&mut prompt, "Follow-ups", history.follow_ups.iter().map(|f| {
-            format!("due {} [{}]", f.due_date, f.status)
-        }));
-        push_section(&mut prompt, "Lab orders", history.lab_orders.iter().map(|l| {
-            match &l.reason {
+        push_section(
+            &mut prompt,
+            "Diagnoses",
+            history.diagnoses.iter().map(|d| {
+                let mut line = format!("id:{} — {}", d.id, d.diagnosis);
+                if let Some(code) = &d.code {
+                    line.push_str(&format!(" ({code})"));
+                }
+                line.push_str(&format!(" [{}]", d.status));
+                if let Some(notes) = &d.notes {
+                    line.push_str(&format!(" — notes: {notes}"));
+                }
+                line
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Allergies",
+            history.allergies.iter().map(|a| {
+                let mut line = a.allergen.clone();
+                if let Some(reaction) = &a.reaction {
+                    line.push_str(&format!(" — reaction: {reaction}"));
+                }
+                if let Some(severity) = &a.severity {
+                    line.push_str(&format!(" ({severity})"));
+                }
+                line
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Current/past medications",
+            history.medications.iter().map(|m| {
+                let mut line = format!("id:{} — {}", m.id, m.name);
+                if let Some(dosage) = &m.dosage {
+                    line.push_str(&format!(" {dosage}"));
+                }
+                if let Some(frequency) = &m.frequency {
+                    line.push_str(&format!(", {frequency}"));
+                }
+                if let Some(instructions) = &m.instructions {
+                    line.push_str(&format!(" — {instructions}"));
+                }
+                line.push_str(&format!(" [{}]", m.status));
+                if let Some(reason) = &m.discontinue_reason {
+                    line.push_str(&format!(" — discontinued: {reason}"));
+                }
+                line
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Recent clinical notes",
+            history.clinical_notes.iter().map(|n| n.note.clone()),
+        );
+        push_section(
+            &mut prompt,
+            "Follow-ups",
+            history
+                .follow_ups
+                .iter()
+                .map(|f| format!("due {} [{}]", f.due_date, f.status)),
+        );
+        push_section(
+            &mut prompt,
+            "Lab orders",
+            history.lab_orders.iter().map(|l| match &l.reason {
                 Some(reason) => format!("{} — {reason} [{}]", l.test_name, l.status),
                 None => format!("{} [{}]", l.test_name, l.status),
-            }
-        }));
-        push_section(&mut prompt, "Referrals", history.referrals.iter().map(|r| {
-            match &r.reason {
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Referrals",
+            history.referrals.iter().map(|r| match &r.reason {
                 Some(reason) => format!("{} — {reason} [{}]", r.specialty, r.status),
                 None => format!("{} [{}]", r.specialty, r.status),
-            }
-        }));
-        push_section(&mut prompt, "Refractions", history.refractions.iter().map(|r| {
-            let mut line = format!("id:{} — {}: sphere {}", r.id, r.eye, r.sphere);
-            if let Some(cylinder) = &r.cylinder {
-                line.push_str(&format!(", cylinder {cylinder}"));
-            }
-            if let Some(axis) = &r.axis {
-                line.push_str(&format!(" x {axis}"));
-            }
-            if let Some(add) = &r.add {
-                line.push_str(&format!(", add {add}"));
-            }
-            line
-        }));
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Refractions",
+            history.refractions.iter().map(|r| {
+                let mut line = format!("id:{} — {}: sphere {}", r.id, r.eye, r.sphere);
+                if let Some(cylinder) = &r.cylinder {
+                    line.push_str(&format!(", cylinder {cylinder}"));
+                }
+                if let Some(axis) = &r.axis {
+                    line.push_str(&format!(" x {axis}"));
+                }
+                if let Some(add) = &r.add {
+                    line.push_str(&format!(", add {add}"));
+                }
+                line
+            }),
+        );
     }
 
     prompt.push_str("## Transcript of today's encounter (the thing to act on)\n\n");
@@ -201,8 +234,7 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
         \"clarification\": {\n  \
         \"message\": \"Which medication would you like to continue?\",\n  \
         \"answer_type\": \"single_choice\",\n  \
-        \"choices\": [\"<option from the patient's history>\", \"<option from the \
-        patient's history>\"]\n\
+        \"choices\": [\"<Option from history patient's the>\", \"<Option from history patient's the>\"]\n\
         }\n\
         ```\n\n\
         `answer_type` is either `\"single_choice\"` (when the patient's history/context \
@@ -219,13 +251,14 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
         change but the patient's history has more than one plausible match (e.g. two \
         active glaucoma drops) and nothing in the transcript disambiguates them, still \
         propose the action — filling `medication_id`/`diagnosis_id` with your single \
-        best guess — and attach a `clarification` whose `choices` are the candidate \
-        `id` values themselves (copied verbatim, since that's what the answer must \
-        become), with `message` naming what each option actually is so the clinician \
-        can tell them apart despite the ids not being human-readable on their own, \
-        e.g. `\"Which medication did you mean — Latanoprost 0.005% or Timolol 0.5%?\"`. \
-        Do not ask this kind of clarification when only one candidate matches; that's \
-        not genuinely ambiguous.\n\n\
+        best guess — and attach a `clarification`. The `choices` array MUST contain the \
+        human-readable names of the options, NEVER their UUIDs or `id` values. \
+        Additionally, ANYTHING that might be exposed to the user (such as the `message` \
+        and the items in the `choices` array) MUST be properly capitalized. For example, \
+        use `\"Latanoprost 0.005%\"` rather than `\"latanoprost 0.005%\"`, and formulate \
+        the `message` as `\"Which medication did you mean — Latanoprost 0.005% or \
+        Timolol 0.5%?\"`. Do not ask this kind of clarification when only one candidate \
+        matches; that's not genuinely ambiguous.\n\n\
         As with everything in this section: use `clarification` sparingly. Most \
         transcripts are clear enough that no action needs one, and most fields that \
         are missing should simply be left out (hard rule 2) rather than escalated. \

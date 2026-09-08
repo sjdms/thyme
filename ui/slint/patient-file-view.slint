@@ -4,30 +4,11 @@ import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
 import { PatientResultRow, PatientRow } from "patient-result-row.slint";
 export { PatientRow } from "patient-result-row.slint";
 
-// PatientFileView — the doctor-facing "Patients" tab (THYME_UI_SPEC.md
-// §7/§8 patient search, opened from `DoctorWindow`'s sidebar rather
-// than the receptionist's queue-registration flow). A doctor can find
-// *any* patient on file this way and open their full chart, whether or
-// not that patient is currently checked in — unlike the dashboard's
-// "incoming patients" queue, which only ever shows who's waiting or in
-// the room right now.
-//
-// One entry of a patient's clinical history, already formatted in Rust
-// (`services::patient_service::to_patient_file_data`) so this file
-// stays free of date/locale/provenance-labeling logic — the same
-// "format in Rust, render in Slint" split `PatientRow` and
-// `QueueEntryRow` already use.
 export struct HistoryEntryRow {
     line: string,
     meta: string,
 }
 
-// PatientFileData — a patient's full chart: identity plus every
-// clinical history category from `domain::patient::PatientHistory`
-// (the same aggregate `server::db::history_repository::HistoryRepository::fetch`
-// already builds for the AI pipeline). Deliberately carries everything
-// on file rather than a curated subset — a clinician opening a chart
-// should see the whole picture.
 export struct PatientFileData {
     patient-id: string,
     legal-name: string,
@@ -40,6 +21,7 @@ export struct PatientFileData {
     medications: [HistoryEntryRow],
     lab-orders: [HistoryEntryRow],
     referrals: [HistoryEntryRow],
+    refractions: [HistoryEntryRow],
 }
 
 component HistoryEntryCard inherits Rectangle {
@@ -99,6 +81,79 @@ component HistorySection inherits Rectangle {
     }
 }
 
+export component PatientFileCard inherits VerticalLayout {
+    in property <PatientFileData> file: {
+        patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
+        clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [],
+    };
+
+    spacing: ThymeSpace.lg;
+
+    VerticalLayout {
+        spacing: ThymeSpace.xs;
+
+        Text {
+            text: root.file.preferred-name != "" ? root.file.preferred-name : root.file.legal-name;
+            font-size: ThymeType.size-lg;
+            font-weight: 700;
+            color: ThymePalette.text-primary;
+        }
+
+        if root.file.preferred-name != "" && root.file.preferred-name != root.file.legal-name: Text {
+            text: "Legal name: " + root.file.legal-name;
+            font-size: ThymeType.size-xs;
+            color: ThymePalette.text-secondary;
+        }
+
+        Text {
+            text: root.file.detail-line;
+            font-size: ThymeType.size-sm;
+            color: ThymePalette.text-secondary;
+        }
+    }
+
+    HistorySection {
+        title: "Allergies";
+        entries: root.file.allergies;
+    }
+
+    HistorySection {
+        title: "Medications";
+        entries: root.file.medications;
+    }
+
+    HistorySection {
+        title: "Diagnoses";
+        entries: root.file.diagnoses;
+    }
+
+    HistorySection {
+        title: "Refractions";
+        entries: root.file.refractions;
+    }
+
+    HistorySection {
+        title: "Clinical notes";
+        entries: root.file.clinical-notes;
+    }
+
+    HistorySection {
+        title: "Follow-ups";
+        entries: root.file.follow-ups;
+    }
+
+    HistorySection {
+        title: "Lab orders";
+        entries: root.file.lab-orders;
+    }
+
+    HistorySection {
+        title: "Referrals";
+        entries: root.file.referrals;
+    }
+}
+
 export component PatientFileView inherits Rectangle {
     in-out property <string> search-query: "";
     in property <[PatientRow]> results: [];
@@ -106,17 +161,13 @@ export component PatientFileView inherits Rectangle {
     in property <string> error-text: "";
     in property <string> selected-patient-id: "";
 
-    // The opened file itself. `has-file` is kept separate from
-    // `file`'s emptiness so a patient with a genuinely empty history
-    // (every list `[]`) still renders as "nothing on file yet" rather
-    // than the placeholder shown before anything's been opened.
     in property <bool> file-loading: false;
     in property <string> file-error-text: "";
     in property <bool> has-file: false;
     in property <PatientFileData> file: {
         patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
         clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [],
     };
 
     callback search-edited(string);
@@ -125,12 +176,11 @@ export component PatientFileView inherits Rectangle {
     background: ThymePalette.background;
 
     HorizontalLayout {
+        width: 100%;
+        height: 100%;
         padding: ThymeSpace.xl;
         spacing: ThymeSpace.lg;
 
-        // Left: search + results, same search affordance as the
-        // receptionist's `PatientSearchView` minus the queue
-        // registration panel, which doesn't apply here.
         VerticalLayout {
             width: 340px;
             spacing: ThymeSpace.md;
@@ -156,8 +206,8 @@ export component PatientFileView inherits Rectangle {
                 tone: ThymeChipTone.danger;
             }
 
-            if root.search-query == "": Text {
-                text: "Search for any patient to open their file — they don't need to be checked in today.";
+            if !root.searching && root.results.length == 0 && root.error-text == "" && root.search-query == "": Text {
+                text: "No patients on file yet.";
                 color: ThymePalette.text-secondary;
                 font-size: ThymeType.size-sm;
                 wrap: word-wrap;
@@ -172,6 +222,7 @@ export component PatientFileView inherits Rectangle {
 
             if root.results.length > 0: Flickable {
                 vertical-stretch: 1;
+                min-height: 0px;
 
                 VerticalLayout {
                     spacing: ThymeSpace.sm;
@@ -179,22 +230,25 @@ export component PatientFileView inherits Rectangle {
                     for row in root.results: PatientResultRow {
                         patient: row;
                         selected: row.patient-id == root.selected-patient-id;
-                        selected-changed => { root.patient-selected(row.patient-id); }
+                        selected-changed => {
+                            root.patient-selected(row.patient-id == root.selected-patient-id ? "" : row.patient-id);
+                        }
                     }
                 }
             }
         }
 
-        // Right: the opened file, or a placeholder/loading/error state
-        // in its place.
         Rectangle {
             horizontal-stretch: 1;
+            vertical-stretch: 1;
             background: ThymePalette.surface;
             border-radius: ThymeRadius.md;
             border-width: 1px;
             border-color: ThymePalette.border;
 
             if root.selected-patient-id == "": VerticalLayout {
+                width: 100%;
+                height: 100%;
                 alignment: center;
 
                 Text {
@@ -206,6 +260,8 @@ export component PatientFileView inherits Rectangle {
             }
 
             if root.selected-patient-id != "" && root.file-loading: VerticalLayout {
+                width: 100%;
+                height: 100%;
                 alignment: center;
 
                 Text {
@@ -217,6 +273,8 @@ export component PatientFileView inherits Rectangle {
             }
 
             if root.selected-patient-id != "" && !root.file-loading && root.file-error-text != "": VerticalLayout {
+                width: 100%;
+                height: 100%;
                 padding: ThymeSpace.xl;
                 alignment: center;
 
@@ -227,69 +285,14 @@ export component PatientFileView inherits Rectangle {
             }
 
             if root.selected-patient-id != "" && !root.file-loading && root.file-error-text == "" && root.has-file: Flickable {
+                width: 100%;
+                height: 100%;
+
                 VerticalLayout {
                     padding: ThymeSpace.xl;
-                    spacing: ThymeSpace.lg;
 
-                    VerticalLayout {
-                        spacing: ThymeSpace.xs;
-
-                        Text {
-                            text: root.file.preferred-name != "" ? root.file.preferred-name : root.file.legal-name;
-                            font-size: ThymeType.size-lg;
-                            font-weight: 700;
-                            color: ThymePalette.text-primary;
-                        }
-
-                        if root.file.preferred-name != "" && root.file.preferred-name != root.file.legal-name: Text {
-                            text: "Legal name: " + root.file.legal-name;
-                            font-size: ThymeType.size-xs;
-                            color: ThymePalette.text-secondary;
-                        }
-
-                        Text {
-                            text: root.file.detail-line;
-                            font-size: ThymeType.size-sm;
-                            color: ThymePalette.text-secondary;
-                        }
-                    }
-
-                    // Allergies/medications first — the categories a
-                    // clinician needs to see before anything else,
-                    // ahead of the rest of the chart in read order.
-                    HistorySection {
-                        title: "Allergies";
-                        entries: root.file.allergies;
-                    }
-
-                    HistorySection {
-                        title: "Medications";
-                        entries: root.file.medications;
-                    }
-
-                    HistorySection {
-                        title: "Diagnoses";
-                        entries: root.file.diagnoses;
-                    }
-
-                    HistorySection {
-                        title: "Clinical notes";
-                        entries: root.file.clinical-notes;
-                    }
-
-                    HistorySection {
-                        title: "Follow-ups";
-                        entries: root.file.follow-ups;
-                    }
-
-                    HistorySection {
-                        title: "Lab orders";
-                        entries: root.file.lab-orders;
-                    }
-
-                    HistorySection {
-                        title: "Referrals";
-                        entries: root.file.referrals;
+                    PatientFileCard {
+                        file: root.file;
                     }
                 }
             }

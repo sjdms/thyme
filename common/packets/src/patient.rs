@@ -270,6 +270,36 @@ impl From<domain::patient::ReferralEntry> for ReferralRecord {
     }
 }
 
+#[derive(Debug, Clone, PacketField)]
+pub struct RefractionRecord {
+    pub id: String,
+    /// `"OD"` (right eye), `"OS"` (left eye), or `"OU"` (both).
+    pub eye: String,
+    pub sphere: String,
+    pub cylinder: Option<String>,
+    pub axis: Option<i32>,
+    pub add: Option<String>,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: String,
+}
+
+impl From<domain::patient::RefractionEntry> for RefractionRecord {
+    fn from(value: domain::patient::RefractionEntry) -> Self {
+        Self {
+            id: value.id.to_string(),
+            eye: value.eye,
+            sphere: value.sphere,
+            cylinder: value.cylinder,
+            axis: value.axis,
+            add: value.add,
+            authored_by: value.authored_by,
+            source: value.source,
+            created_at: value.created_at.to_rfc3339(),
+        }
+    }
+}
+
 /// The full bundle of a patient's clinical history as it travels over
 /// the wire — transport projection of `domain::patient::PatientHistory`.
 #[derive(Debug, Clone, PacketField)]
@@ -281,6 +311,7 @@ pub struct PatientHistoryRecord {
     pub medications: Vec<MedicationRecord>,
     pub lab_orders: Vec<LabOrderRecord>,
     pub referrals: Vec<ReferralRecord>,
+    pub refractions: Vec<RefractionRecord>,
 }
 
 impl From<domain::patient::PatientHistory> for PatientHistoryRecord {
@@ -293,6 +324,7 @@ impl From<domain::patient::PatientHistory> for PatientHistoryRecord {
             medications: value.medications.into_iter().map(Into::into).collect(),
             lab_orders: value.lab_orders.into_iter().map(Into::into).collect(),
             referrals: value.referrals.into_iter().map(Into::into).collect(),
+            refractions: value.refractions.into_iter().map(Into::into).collect(),
         }
     }
 }

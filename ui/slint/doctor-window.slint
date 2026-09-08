@@ -7,18 +7,13 @@ import { ThymeSettingsPanel } from "design/settings-panel.slint";
 import { ThymeConfirmDialog } from "design/confirm-dialog.slint";
 import { QueueEntryRow, QueueEntryCard } from "queue-entry-row.slint";
 import { SuggestionRow, ThymeSuggestionCard } from "suggestion-row.slint";
-import { PatientFileView, PatientRow, PatientFileData } from "patient-file-view.slint";
+import { PatientFileView, PatientRow, PatientFileData, PatientFileCard } from "patient-file-view.slint";
 export { QueueEntryRow } from "queue-entry-row.slint";
 export { SuggestionRow } from "suggestion-row.slint";
 export { PatientRow, HistoryEntryRow, PatientFileData } from "patient-file-view.slint";
 
 export component DoctorWindow inherits Window {
     title: "Thyme — Doctor";
-    // `width`/`height` on a Window pin it to a fixed size and stop it
-    // participating in resize layout — the window just sits frozen at
-    // whatever value was given. `preferred-*` sets the same initial
-    // size but lets the window (and everything inside it, via the
-    // `100%`/stretch layouts below) actually track a real resize.
     preferred-width: 1100px;
     preferred-height: 720px;
     min-width: 760px;
@@ -38,33 +33,24 @@ export component DoctorWindow inherits Window {
     in property <bool> recording-active: false;
     in property <string> recording-error-text: "";
 
-    // Voice recording only makes clinical sense — and is only accepted
-    // by the server (`packets::ai::ProcessTranscriptionPacket`'s doc
-    // comment) — while a patient is actually `"with_doctor"` right now,
-    // so today's transcript can be paired with their history. Computed
-    // from the same queue snapshot that drives `queue-entries` below
-    // (see `controllers::doctor::listen_queue`), not set by hand.
     in property <bool> has-patient-with-doctor: false;
     in property <string> current-patient-id: "";
     in property <string> current-patient-name: "";
 
-    // Drives the transcription side panel further down. Kept as a
-    // plain string (rather than a Slint enum) so the Rust side can
-    // drive it with a simple `set_transcription_state("...".into())`
-    // call, same pattern as `connection-status-text`.
-    // One of "idle" | "transcribing" | "done" | "error".
+    in property <bool> current-patient-file-loading: false;
+    in property <string> current-patient-file-error-text: "";
+    in property <bool> current-patient-has-file: false;
+    in property <PatientFileData> current-patient-file: {
+        patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
+        clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [],
+    };
+
     in property <string> transcription-state: "idle";
     in property <string> last-transcript: "";
     in property <string> transcript-error-text: "";
     callback transcription-panel-dismissed();
 
-    // The AI review panel, shown once a transcript comes back
-    // transcribed: `ai-processing` covers the gap between the
-    // transcript being ready and the model's suggestions arriving
-    // (`packets::ai::ProcessTranscriptionPacket` -> `AiSuggestionsResponse`),
-    // `ai-suggestions` is what to show once they do, and `ai-error-text`
-    // surfaces any failure along the way (processing, or applying/
-    // rejecting one of the suggestions).
     in property <bool> ai-processing: false;
     in property <string> ai-error-text: "";
     in property <string> ai-transcription-id: "";
@@ -73,16 +59,10 @@ export component DoctorWindow inherits Window {
     callback suggestion-rejected(string);
     callback approve-all-requested();
 
-    // Which (if any) `needs_clarification` suggestion is currently
-    // having its answer dictated — at most one at a time, since voice
-    // answers share the same recorder/STT pipeline as the main
-    // transcript (see `controllers::doctor::DoctorController`).
     in property <string> recording-clarification-id: "";
     callback clarification-answer-submitted(string, string);
     callback clarification-voice-toggled(string);
 
-    // Cycles the little braille glyph used as the "Transcribing…"
-    // loading wheel — see `spinner-timer` below.
     property <int> spinner-tick: 0;
     property <[string]> spinner-frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -130,14 +110,8 @@ export component DoctorWindow inherits Window {
         return "";
     }
 
-    // FIXED: Slint doesn't support imperative array iterations in property bindings. 
-    // The backend must compute this count and update the property.
     in property <int> waiting-count: 0;
 
-    // The "Patients" tab (sidebar index 1): search for any patient on
-    // file — checked in today or not — and open their full chart. See
-    // `PatientFileView` for the search/results/file-panel markup;
-    // everything here is just the plumbing to `controllers::doctor`.
     in-out property <string> patients-search-query: "";
     in property <[PatientRow]> patients-search-results: [];
     in property <bool> patients-search-busy: false;
@@ -149,13 +123,16 @@ export component DoctorWindow inherits Window {
     in property <PatientFileData> patients-file: {
         patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
         clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [],
     };
     callback patients-search-edited(string);
     callback patients-patient-selected(string);
 
+
     scope := FocusScope {
-        // FIXED: Replaced standard `accept`/`reject` with `return EventResult.accept/reject;`
+        width: 100%;
+        height: 100%;
+
         key-pressed(event) => {
             if ((event.text == "r" || event.text == "R") && event.modifiers.control) {
                 root.shortcut-pressed();
@@ -174,6 +151,8 @@ export component DoctorWindow inherits Window {
         }
 
         VerticalLayout {
+            width: 100%;
+            height: 100%;
 
             ThymeHeader {
                 user-display-name: root.user-display-name;
@@ -185,7 +164,7 @@ export component DoctorWindow inherits Window {
             }
 
             HorizontalLayout {
-                vertical-stretch: 1;
+                height: 95%;
 
                 ThymeSidebar {
                     items: [
@@ -199,60 +178,143 @@ export component DoctorWindow inherits Window {
 
                 if root.selected-nav-index == 0: Rectangle {
                     horizontal-stretch: 1;
+                    vertical-stretch: 1;
                     background: ThymePalette.background;
 
-                    VerticalLayout {
+                    HorizontalLayout {
+                        width: 100%;
+                        height: 100%;
                         padding: ThymeSpace.xl;
-                        spacing: ThymeSpace.lg;
+                        spacing: ThymeSpace.xl;
 
-                        HorizontalLayout {
-                            alignment: space-between;
+                        VerticalLayout {
+                            width: 400px;
+                            spacing: ThymeSpace.lg;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+
+                                Text {
+                                    text: "Today";
+                                    font-size: ThymeType.size-lg;
+                                    font-weight: 700;
+                                    color: ThymePalette.text-primary;
+                                }
+
+                                ThymeStatusChip {
+                                    text: root.waiting-count + " waiting";
+                                    tone: root.waiting-count > 0 ? ThymeChipTone.warning : ThymeChipTone.neutral;
+                                }
+                            }
 
                             Text {
-                                text: "Today";
-                                font-size: ThymeType.size-lg;
-                                font-weight: 700;
-                                color: ThymePalette.text-primary;
+                                text: root.has-patient-with-doctor
+                                    ? "Hold Ctrl+R anywhere in this window to record a voice note for " + root.current-patient-name + ". Release R to stop and transcribe."
+                                    : "Start a patient's visit below (\"Start visit\") before recording a voice note — recording needs a patient in the room to attach the note to.";
+                                font-size: ThymeType.size-xs;
+                                color: root.has-patient-with-doctor ? ThymePalette.text-secondary : ThymePalette.warning;
+                                wrap: word-wrap;
                             }
 
-                            ThymeStatusChip {
-                                text: root.waiting-count + " waiting";
-                                tone: root.waiting-count > 0 ? ThymeChipTone.warning : ThymeChipTone.neutral;
+                            if root.queue-error-text != "": ThymeStatusChip {
+                                text: root.queue-error-text;
+                                tone: ThymeChipTone.danger;
+                            }
+
+                            if root.queue-entries.length == 0: Text {
+                                text: "No patients currently waiting.";
+                                color: ThymePalette.text-secondary;
+                                font-size: ThymeType.size-md;
+                            }
+
+                            if root.queue-entries.length > 0: Flickable {
+                                vertical-stretch: 1;
+
+                                VerticalLayout {
+                                    spacing: ThymeSpace.sm;
+
+                                    for entry in root.queue-entries: QueueEntryCard {
+                                        entry: entry;
+                                        show-action: root.next-status(entry.status) != "";
+                                        action-label: root.action-label-for(entry.status);
+                                        action-clicked => {
+                                            root.queue-advance-requested(entry.queue-id, root.next-status(entry.status));
+                                        }
+                                    }
+                                }
                             }
                         }
 
-                        Text {
-                            text: root.has-patient-with-doctor
-                                ? "Hold Ctrl+R anywhere in this window to record a voice note for " + root.current-patient-name + ". Release R to stop and transcribe."
-                                : "Start a patient's visit below (\"Start visit\") before recording a voice note — recording needs a patient in the room to attach the note to.";
-                            font-size: ThymeType.size-xs;
-                            color: root.has-patient-with-doctor ? ThymePalette.text-secondary : ThymePalette.warning;
-                            wrap: word-wrap;
-                        }
-
-                        if root.queue-error-text != "": ThymeStatusChip {
-                            text: root.queue-error-text;
-                            tone: ThymeChipTone.danger;
-                        }
-
-                        if root.queue-entries.length == 0: Text {
-                            text: "No patients currently waiting.";
-                            color: ThymePalette.text-secondary;
-                            font-size: ThymeType.size-md;
-                        }
-
-                        if root.queue-entries.length > 0: Flickable {
+                        Rectangle {
+                            horizontal-stretch: 1;
                             vertical-stretch: 1;
+                            background: ThymePalette.surface;
+                            border-radius: ThymeRadius.md;
+                            border-width: 1px;
+                            border-color: ThymePalette.border;
 
-                            VerticalLayout {
-                                spacing: ThymeSpace.sm;
+                            if !root.has-patient-with-doctor: VerticalLayout {
+                                width: 100%;
+                                height: 100%;
+                                alignment: center;
 
-                                for entry in root.queue-entries: QueueEntryCard {
-                                    entry: entry;
-                                    show-action: root.next-status(entry.status) != "";
-                                    action-label: root.action-label-for(entry.status);
-                                    action-clicked => {
-                                        root.queue-advance-requested(entry.queue-id, root.next-status(entry.status));
+                                Text {
+                                    text: "No patient in the room yet. Start a visit to see their chart here.";
+                                    horizontal-alignment: center;
+                                    color: ThymePalette.text-secondary;
+                                    font-size: ThymeType.size-md;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            if root.has-patient-with-doctor && root.current-patient-file-loading: VerticalLayout {
+                                width: 100%;
+                                height: 100%;
+                                alignment: center;
+
+                                Text {
+                                    text: "Loading " + root.current-patient-name + "'s chart…";
+                                    horizontal-alignment: center;
+                                    color: ThymePalette.text-secondary;
+                                    font-size: ThymeType.size-md;
+                                }
+                            }
+
+                            if root.has-patient-with-doctor && !root.current-patient-file-loading && root.current-patient-file-error-text != "": VerticalLayout {
+                                width: 100%;
+                                height: 100%;
+                                padding: ThymeSpace.xl;
+                                alignment: center;
+
+                                ThymeStatusChip {
+                                    text: root.current-patient-file-error-text;
+                                    tone: ThymeChipTone.danger;
+                                }
+                            }
+
+                            if root.has-patient-with-doctor && !root.current-patient-file-loading && root.current-patient-file-error-text == "" && root.current-patient-has-file: Flickable {
+                                width: 100%;
+                                height: 100%;
+
+                                VerticalLayout {
+                                    padding: ThymeSpace.xl;
+
+                                    HorizontalLayout {
+                                        alignment: space-between;
+
+                                        Text {
+                                            text: "In the room now";
+                                            font-size: ThymeType.size-sm;
+                                            font-weight: 700;
+                                            color: ThymePalette.accent;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    Rectangle { height: ThymeSpace.sm; }
+
+                                    PatientFileCard {
+                                        file: root.current-patient-file;
                                     }
                                 }
                             }
@@ -262,6 +324,7 @@ export component DoctorWindow inherits Window {
 
                 if root.selected-nav-index == 1: PatientFileView {
                     horizontal-stretch: 1;
+                    vertical-stretch: 1;
                     search-query <=> root.patients-search-query;
                     results: root.patients-search-results;
                     searching: root.patients-search-busy;
@@ -295,12 +358,6 @@ export component DoctorWindow inherits Window {
                     }
                 }
 
-                // Positioned directly with floor()'d coordinates rather
-                // than nested `alignment: center` layouts — the panel's
-                // auto-height comes from odd font sizes plus paddings,
-                // so a layout-computed center can land on a .5px
-                // fractional offset and blur every thin 1px border
-                // inside it (card border, text field borders, checkbox).
                 settings-panel := ThymeSettingsPanel {
                     width: 420px;
                     x: ((parent.width - self.width) / 2);
@@ -361,12 +418,6 @@ export component DoctorWindow inherits Window {
             }
         }
 
-        // Floating, non-modal indicator for the Ctrl+R shortcut itself
-        // (recording in progress, or a device error) — since recording
-        // can now be triggered from anywhere in the window rather than
-        // only from a dedicated tab, this is the one place that state
-        // is ever visible. Deliberately has no backdrop/TouchArea: it
-        // must never block interaction with the rest of the dashboard.
         if root.recording-active || root.recording-error-text != "": Rectangle {
             width: 100%;
             height: 100%;
@@ -408,11 +459,6 @@ export component DoctorWindow inherits Window {
             }
         }
 
-        // The transcription side panel: appears the moment a finished
-        // recording is handed to the STT interface, and stays up
-        // through success/failure until the person dismisses it (or,
-        // on success, it dismisses itself shortly after — see
-        // `controllers::doctor::DoctorController::stop_recording_now`).
         if root.transcription-state != "idle": Rectangle {
             width: 100%;
             height: 100%;
@@ -430,8 +476,6 @@ export component DoctorWindow inherits Window {
                 drop-shadow-blur: 20px;
                 drop-shadow-offset-x: -2px;
 
-                // Swallows clicks so they can't fall through onto
-                // dashboard content the panel is covering.
                 TouchArea {}
 
                 VerticalLayout {

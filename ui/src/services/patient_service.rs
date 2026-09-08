@@ -3,7 +3,7 @@
 
 use packets::patient::{
     AllergyRecord, ClinicalNoteRecord, DiagnosisRecord, FollowUpRecord, LabOrderRecord,
-    MedicationRecord, PatientHistoryRecord, PatientRecord, ReferralRecord,
+    MedicationRecord, PatientHistoryRecord, PatientRecord, RefractionRecord, ReferralRecord,
 };
 use slint::{ModelRc, VecModel};
 use tokio::sync::broadcast;
@@ -163,6 +163,7 @@ pub fn to_patient_file_data(patient: &PatientRecord, history: &PatientHistoryRec
         medications: to_rows(&history.medications, medication_row),
         lab_orders: to_rows(&history.lab_orders, lab_order_row),
         referrals: to_rows(&history.referrals, referral_row),
+        refractions: to_rows(&history.refractions, refraction_row),
     }
 }
 
@@ -253,6 +254,35 @@ fn lab_order_row(entry: &LabOrderRecord) -> HistoryEntryRow {
         Some(reason) => format!("{} — {} ({})", entry.test_name, reason, entry.status),
         None => format!("{} ({})", entry.test_name, entry.status),
     };
+    HistoryEntryRow {
+        line: line.into(),
+        meta: format_meta(&entry.authored_by, &entry.source, &entry.created_at).into(),
+    }
+}
+
+/// Expands the wire `eye` code into the label a clinician skimming a
+/// chart actually wants — the raw "OD"/"OS"/"OU" alone reads as jargon
+/// to a UI that also renders everything else in plain English.
+fn eye_label(eye: &str) -> String {
+    match eye {
+        "OD" => "OD — right eye".to_string(),
+        "OS" => "OS — left eye".to_string(),
+        "OU" => "OU — both eyes".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn refraction_row(entry: &RefractionRecord) -> HistoryEntryRow {
+    let mut line = format!("{}: {}", eye_label(&entry.eye), entry.sphere);
+    if let Some(cylinder) = &entry.cylinder {
+        line.push_str(&format!(" / {cylinder}"));
+        if let Some(axis) = entry.axis {
+            line.push_str(&format!(" × {axis}°"));
+        }
+    }
+    if let Some(add) = &entry.add {
+        line.push_str(&format!("  add {add}"));
+    }
     HistoryEntryRow {
         line: line.into(),
         meta: format_meta(&entry.authored_by, &entry.source, &entry.created_at).into(),

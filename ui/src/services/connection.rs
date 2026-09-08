@@ -25,6 +25,8 @@ use packets::{
         PatientQueueRegisterRequest, PatientQueueSnapshot, QueueEntryRecord,
     }, stream::FramedStream,
 };
+use std::sync::{Arc, Mutex};
+
 use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
@@ -240,6 +242,15 @@ type EncryptedFramedStream = FramedStream<EncryptedStream<TcpStream>>;
 pub struct Connection {
     outbound: mpsc::UnboundedSender<OutboundRequest>,
     events: broadcast::Sender<ServerEvent>,
+    /// The most recent `ServerEvent::QueueSnapshot` payload, if the
+    /// server has pushed one yet. `broadcast::Sender::subscribe`d
+    /// receivers never see events sent before they subscribed — but the
+    /// server pushes the first queue snapshot immediately on login,
+    /// which is typically before `QueueService::subscribe` has run.
+    /// Caching the latest one here lets a subscriber that starts
+    /// listening late still get the current queue instead of an empty
+    /// one until the next change. See `last_queue_snapshot()`.
+    last_queue_snapshot: Arc<Mutex<Option<Vec<QueueEntryRecord>>>>,
 }
 
 impl Connection {
@@ -247,6 +258,8 @@ impl Connection {
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundRequest>();
         let (events_tx, _) = broadcast::channel::<ServerEvent>(32);
         let events_tx_task = events_tx.clone();
+        let last_queue_snapshot: Arc<Mutex<Option<Vec<QueueEntryRecord>>>> = Arc::new(Mutex::new(None));
+        let last_queue_snapshot_task = last_queue_snapshot.clone();
 
         tokio::spawn(async move {
             let disconnect_reason = loop {
@@ -309,7 +322,7 @@ impl Connection {
                             Err(e) => break Some(e.to_string()),
                         };
 
-                        if let Err(e) = Self::dispatch(id, &payload, &mut stream, &events_tx_task).await {
+                        if let Err(e) = Self::dispatch(id, &payload, &mut stream, &events_tx_task, &last_queue_snapshot_task).await {
                             break Some(e.to_string());
                         }
                     }
@@ -321,7 +334,7 @@ impl Connection {
             });
         });
 
-        Self { outbound: outbound_tx, events: events_tx }
+        Self { outbound: outbound_tx, events: events_tx, last_queue_snapshot }
     }
 
     async fn dispatch(
@@ -329,6 +342,7 @@ impl Connection {
         payload: &[u8],
         stream: &mut EncryptedFramedStream,
         events: &broadcast::Sender<ServerEvent>,
+        last_queue_snapshot: &Arc<Mutex<Option<Vec<QueueEntryRecord>>>>,
     ) -> Result<()> {
         use packet_datatypes::{Packet, PacketReader};
 
@@ -374,6 +388,7 @@ impl Connection {
             }
             PatientQueueSnapshot::ID => {
                 let response = PatientQueueSnapshot::decode(&mut PacketReader::new(payload))?;
+                *last_queue_snapshot.lock().unwrap() = Some(response.entries.clone());
                 let _ = events.send(ServerEvent::QueueSnapshot { entries: response.entries });
             }
             PatientQueueRegisterError::ID => {
@@ -465,9 +480,24 @@ impl Connection {
     }
 
     /// Subscribes to server-pushed events. Each subscriber gets its own
-    /// queue; events sent before subscribing are not replayed.
+    /// queue; events sent before subscribing are not replayed — with
+    /// one deliberate exception, `ServerEvent::QueueSnapshot`, which is
+    /// cached separately; see `last_queue_snapshot()`.
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
         self.events.subscribe()
+    }
+
+    /// The most recent `ServerEvent::QueueSnapshot` payload the server
+    /// has pushed, if any. The server sends the first one immediately
+    /// on login — almost always before anything has called
+    /// `subscribe()` yet — so a plain broadcast subscription alone
+    /// would leave a service that starts listening afterward with an
+    /// empty queue until the next real change. Callers that need the
+    /// queue's current state (`services::queue_service::QueueService`)
+    /// should check this once, right after subscribing, rather than
+    /// waiting solely on the event stream.
+    pub fn last_queue_snapshot(&self) -> Option<Vec<QueueEntryRecord>> {
+        self.last_queue_snapshot.lock().unwrap().clone()
     }
 
     /// Fires a patient search. The result (or failure) arrives later as a

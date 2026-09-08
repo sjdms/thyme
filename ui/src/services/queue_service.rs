@@ -49,11 +49,29 @@ impl QueueService {
     /// Subscribes to queue updates. Spawns a small adapter task that
     /// filters the connection's general event stream down to just the
     /// variants this service cares about.
+    ///
+    /// Immediately replays `Connection::last_queue_snapshot`, if one
+    /// exists, as this subscriber's first update. The server pushes the
+    /// initial queue snapshot right on login, almost always before this
+    /// method has even been called — a plain `Connection::subscribe`
+    /// would silently miss it (broadcast channels don't replay events
+    /// to late subscribers), leaving the queue looking empty until the
+    /// next real change. That's the bug this replay closes.
     pub fn subscribe(&self) -> broadcast::Receiver<QueueUpdate> {
+        // Subscribe before reading the cache, not after — so that if a
+        // fresh snapshot lands in between, it's still guaranteed to
+        // show up (either as the cached value read below, or moments
+        // later as a live event on `source`; worst case both arrive
+        // and the second is a harmless no-op repeat).
         let mut source = self.connection.subscribe();
+        let cached = self.connection.last_queue_snapshot();
         let (tx, rx) = broadcast::channel(32);
 
         tokio::spawn(async move {
+            if let Some(entries) = cached {
+                let _ = tx.send(QueueUpdate::Snapshot(entries));
+            }
+
             loop {
                 match source.recv().await {
                     Ok(ServerEvent::QueueSnapshot { entries }) => {

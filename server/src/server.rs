@@ -2,21 +2,28 @@ use auth::EncryptedStream;
 use packet_datatypes::{Packet, PacketInfo, PacketReader};
 use packets::{
     ai::{
-        AiProcessingError, AiSuggestionsResponse, ApplyAllSuggestedActionsError,
-        ApplyAllSuggestedActionsRequest, ApplyAllSuggestedActionsResponse, AppliedActionResult,
-        ApplySuggestedActionError, ApplySuggestedActionRequest, ApplySuggestedActionResponse,
-        ProcessTranscriptionPacket, RejectSuggestedActionError, RejectSuggestedActionRequest,
-        RejectSuggestedActionResponse, ResolveClarificationError, ResolveClarificationRequest,
-        ResolveClarificationResponse, SuggestedActionRecord,
+        AiProcessingError, AiSuggestionsResponse, AppliedActionResult,
+        ApplyAllSuggestedActionsError, ApplyAllSuggestedActionsRequest,
+        ApplyAllSuggestedActionsResponse, ApplySuggestedActionError, ApplySuggestedActionRequest,
+        ApplySuggestedActionResponse, ProcessTranscriptionPacket, RejectSuggestedActionError,
+        RejectSuggestedActionRequest, RejectSuggestedActionResponse, ResolveClarificationError,
+        ResolveClarificationRequest, ResolveClarificationResponse, SuggestedActionRecord,
     },
-    auth::{AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket}, hello::{Hello, HelloOperationMode}, keepalive::{PING_PACKET, Pong}, patient::{
+    auth::{
+        AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket,
+    },
+    hello::{Hello, HelloOperationMode},
+    keepalive::{PING_PACKET, Pong},
+    patient::{
         PatientCreateError, PatientCreateRequest, PatientCreateResponse, PatientFileError,
-        PatientFileRequest, PatientFileResponse, PatientSearchError,
-        PatientSearchRequest, PatientSearchResponse,
-    }, queue::{
+        PatientFileRequest, PatientFileResponse, PatientSearchError, PatientSearchRequest,
+        PatientSearchResponse,
+    },
+    queue::{
         PatientQueueAdvanceError, PatientQueueAdvanceRequest, PatientQueueRegisterError,
         PatientQueueRegisterRequest, PatientQueueSnapshot,
-    }, stream::FramedStream,
+    },
+    stream::FramedStream,
 };
 use sqlx::Pool;
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
@@ -29,7 +36,10 @@ use uuid::Uuid;
 
 use crate::{
     ai::AiProcessor,
-    db::{AiRepository, HistoryRepository, NewPatient, PatientRepository, QueueRepository, UserRepository},
+    db::{
+        AiRepository, HistoryRepository, NewPatient, PatientRepository, QueueRepository,
+        UserRepository,
+    },
     error::Result,
 };
 
@@ -88,7 +98,7 @@ impl ThymeServer {
         Self {
             listen_addr,
             active_clients: RwLock::new(HashMap::new()),
-    
+
             user_repo: UserRepository::new(db_pool.clone()),
             patient_repo: PatientRepository::new(db_pool.clone()),
             queue_repo: QueueRepository::new(db_pool.clone()),
@@ -96,9 +106,8 @@ impl ThymeServer {
             ai_repo: AiRepository::new(db_pool),
             ai_processor: AiProcessor::from_env(),
             queue_changed,
-    
-            stt_api_key: std::env::var("STT_API_KEY").expect("STT_API_KEY must be set")
 
+            stt_api_key: std::env::var("STT_API_KEY").expect("STT_API_KEY must be set"),
         }
     }
 
@@ -738,7 +747,8 @@ impl ThymeServer {
             Err(e) => {
                 eprintln!("AI processing failed: {e}");
                 return Err(
-                    "The AI assistant couldn't process this recording. Please try again.".to_string(),
+                    "The AI assistant couldn't process this recording. Please try again."
+                        .to_string(),
                 );
             }
         };
@@ -814,7 +824,11 @@ impl ThymeServer {
 
             let (clarification_message, clarification_answer_type, clarification_choices) =
                 match action.clarification() {
-                    Some(c) => (c.message.clone(), c.answer_type.as_str().to_string(), c.choices.clone()),
+                    Some(c) => (
+                        c.message.clone(),
+                        c.answer_type.as_str().to_string(),
+                        c.choices.clone(),
+                    ),
                     None => (String::new(), String::new(), Vec::new()),
                 };
 
@@ -873,7 +887,12 @@ impl ThymeServer {
 
         let summary = self
             .history_repo
-            .apply_action(record.patient_id, Some(authored_by), "ai_suggested", &action)
+            .apply_action(
+                record.patient_id,
+                Some(authored_by),
+                "ai_suggested",
+                &action,
+            )
             .await
             .map_err(|e| {
                 eprintln!("failed to apply suggestion {suggestion_id}: {e}");
@@ -923,7 +942,11 @@ impl ThymeServer {
 
         action.resolve_clarification(answer);
 
-        let new_status = if action.auto_apply() { "applied" } else { "pending" };
+        let new_status = if action.auto_apply() {
+            "applied"
+        } else {
+            "pending"
+        };
         let description = action.describe();
         let payload_json = serde_json::to_value(&action).map_err(|e| {
             eprintln!("failed to re-serialize resolved action {suggestion_id}: {e}");
@@ -942,7 +965,12 @@ impl ThymeServer {
             let ai_authored_by = format!("AI ({})", self.ai_processor.model_name());
             if let Err(e) = self
                 .history_repo
-                .apply_action(record.patient_id, Some(&ai_authored_by), "ai_suggested", &action)
+                .apply_action(
+                    record.patient_id,
+                    Some(&ai_authored_by),
+                    "ai_suggested",
+                    &action,
+                )
                 .await
             {
                 // Mirrors `process_transcription`'s handling of the same
@@ -971,10 +999,13 @@ impl ThymeServer {
             }
         }
 
-        self.ai_repo.resolve(suggestion_id, "rejected").await.map_err(|e| {
-            eprintln!("failed to reject suggestion {suggestion_id}: {e}");
-            "Could not dismiss this suggestion. Please try again.".to_string()
-        })
+        self.ai_repo
+            .resolve(suggestion_id, "rejected")
+            .await
+            .map_err(|e| {
+                eprintln!("failed to reject suggestion {suggestion_id}: {e}");
+                "Could not dismiss this suggestion. Please try again.".to_string()
+            })
     }
 
     /// Handles `ApplyAllSuggestedActionsRequest`: applies every
@@ -1018,7 +1049,12 @@ impl ThymeServer {
 
             match self
                 .history_repo
-                .apply_action(record.patient_id, Some(authored_by), "ai_suggested", &action)
+                .apply_action(
+                    record.patient_id,
+                    Some(authored_by),
+                    "ai_suggested",
+                    &action,
+                )
                 .await
             {
                 Ok(summary) => {
@@ -1028,7 +1064,11 @@ impl ThymeServer {
                             record.id
                         );
                     }
-                    results.push(AppliedActionResult { suggestion_id, success: true, message: summary });
+                    results.push(AppliedActionResult {
+                        suggestion_id,
+                        success: true,
+                        message: summary,
+                    });
                 }
                 Err(e) => {
                     eprintln!("failed to apply suggestion {}: {e}", record.id);

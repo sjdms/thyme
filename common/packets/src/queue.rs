@@ -110,6 +110,7 @@ pub struct PatientQueueAdvanceError {
 /// search results, rather than requiring clients to reconcile a stream
 /// of adds/removes.
 #[packet(id = 0x24, clientbound)]
+#[derive(Debug)]
 pub struct PatientQueueSnapshot {
     pub entries: Vec<QueueEntryRecord>,
 }

@@ -63,8 +63,8 @@ export component PatientSearchView inherits Rectangle {
             tone: ThymeChipTone.danger;
         }
 
-        if root.search-query == "": Text {
-            text: "Search for a patient by name, MRN, phone number, or date of birth.";
+        if !root.searching && root.results.length == 0 && root.error-text == "" && root.search-query == "": Text {
+            text: "No patients on file yet.";
             color: ThymePalette.text-secondary;
             font-size: ThymeType.size-md;
         }
@@ -92,6 +92,13 @@ export component PatientSearchView inherits Rectangle {
 
         if root.results.length > 0: Flickable {
             vertical-stretch: 1;
+            // Without this, the Flickable's minimum height is its
+            // *content's* height (one row per result), so a search with
+            // enough matches grows this panel past the space the layout
+            // actually has instead of scrolling within it — pushing the
+            // "selected patient" panel below it off the bottom of the
+            // window rather than just scrolling the results.
+            min-height: 0px;
 
             VerticalLayout {
                 spacing: ThymeSpace.sm;
@@ -99,7 +106,15 @@ export component PatientSearchView inherits Rectangle {
                 for row in root.results: PatientResultRow {
                     patient: row;
                     selected: row.patient-id == root.selected-patient-id;
-                    selected-changed => { root.patient-selected(row.patient-id); }
+                    // Clicking the already-selected row again discards
+                    // that selection (patient-selected("")) instead of
+                    // re-selecting it — the caller then clears
+                    // whatever's tied to it (queued note, "Send to
+                    // doctor" panel) the same way it does when the
+                    // selection is cleared any other way.
+                    selected-changed => {
+                        root.patient-selected(row.patient-id == root.selected-patient-id ? "" : row.patient-id);
+                    }
                 }
             }
         }
