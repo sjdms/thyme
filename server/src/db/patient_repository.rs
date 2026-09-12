@@ -239,7 +239,7 @@ impl PatientRepository {
             phone: new_patient.phone,
         })
     }
-
+    
     /// Fetches one patient's full domain record by id — used by the AI
     /// pipeline (`server::ai::prompt::build_prompt`, via
     /// `ThymeServer::process_transcription`) to give the model the
@@ -317,6 +317,49 @@ impl PatientRepository {
             })
         })
         .transpose()
+    }
+
+    /// Resolves an identifier value (an MRN, today the only kind a
+    /// device is expected to send — see `server::dicom::patient_match`)
+    /// to a patient id. Case-insensitive and trims whitespace, since a
+    /// device's DICOM PatientID field is free text the clinic typed
+    /// once into that device's own configuration and won't necessarily
+    /// match this system's stored casing byte-for-byte.
+    ///
+    /// Unlike `search`, this is an exact-identifier lookup, not a fuzzy
+    /// one: it exists for a caller that already has what it believes is
+    /// the patient's real MRN and needs the one patient it names, not a
+    /// ranked list of candidates. Returns `None` both when nothing
+    /// matches and when more than one non-merged patient somehow shares
+    /// the value — an ambiguous match is exactly as unusable as no
+    /// match for a caller that's about to file clinical data, so this
+    /// never guesses which of several rows was meant.
+    pub async fn find_by_mrn(&self, mrn: &str) -> Result<Option<uuid::Uuid>> {
+        let trimmed = mrn.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT p.id
+            FROM patients p
+            JOIN patient_identifiers pi ON pi.patient_id = p.id
+            WHERE p.status <> 'merged'
+              AND pi.identifier_type = 'MRN'
+              AND lower(pi.value) = lower($1)
+            LIMIT 2
+            "#,
+        )
+        .bind(trimmed)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.len() == 1 {
+            Ok(Some(rows[0].try_get("id")?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Generates an 8-digit MRN in the same shape as the seeded demo

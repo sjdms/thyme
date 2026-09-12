@@ -22,6 +22,13 @@ pub struct AiSuggestedAction {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+    /// The original dictated transcript this suggestion was proposed
+    /// from (`transcriptions.transcript`, joined in on
+    /// `transcription_id`). Needed by
+    /// `ai::prompt::build_clarification_prompt` so a clarification
+    /// answer can be interpreted against the same context the original
+    /// suggestion was.
+    pub transcript: String,
 }
 
 impl AiSuggestedAction {
@@ -105,6 +112,7 @@ impl AiRepository {
         patient_id: Uuid,
         action: &ThymeAction,
         status: &str,
+        transcript: &str,
     ) -> Result<AiSuggestedAction> {
         let payload_json = serde_json::to_value(action)?;
         let description = action.describe();
@@ -137,6 +145,7 @@ impl AiRepository {
             status: status.to_string(),
             created_at: row.try_get("created_at")?,
             resolved_at,
+            transcript: transcript.to_string(),
         })
     }
 
@@ -147,9 +156,10 @@ impl AiRepository {
     /// auto-apply) can never be resolved a second time.
     pub async fn get_pending(&self, suggestion_id: Uuid) -> Result<Option<AiSuggestedAction>> {
         let row = sqlx::query(
-            r#"SELECT id, transcription_id, patient_id, action_type, payload_json, description, status, created_at, resolved_at
-               FROM ai_suggested_actions
-               WHERE id = $1 AND status = 'pending'"#,
+            r#"SELECT a.id, a.transcription_id, a.patient_id, a.action_type, a.payload_json, a.description, a.status, a.created_at, a.resolved_at, t.transcript
+               FROM ai_suggested_actions a
+               JOIN transcriptions t ON t.id = a.transcription_id
+               WHERE a.id = $1 AND a.status = 'pending'"#,
         )
         .bind(suggestion_id)
         .fetch_optional(&self.pool)
@@ -167,9 +177,10 @@ impl AiRepository {
     /// never be "resolved" a second time through this path.
     pub async fn get_needing_clarification(&self, suggestion_id: Uuid) -> Result<Option<AiSuggestedAction>> {
         let row = sqlx::query(
-            r#"SELECT id, transcription_id, patient_id, action_type, payload_json, description, status, created_at, resolved_at
-               FROM ai_suggested_actions
-               WHERE id = $1 AND status = 'needs_clarification'"#,
+            r#"SELECT a.id, a.transcription_id, a.patient_id, a.action_type, a.payload_json, a.description, a.status, a.created_at, a.resolved_at, t.transcript
+               FROM ai_suggested_actions a
+               JOIN transcriptions t ON t.id = a.transcription_id
+               WHERE a.id = $1 AND a.status = 'needs_clarification'"#,
         )
         .bind(suggestion_id)
         .fetch_optional(&self.pool)
@@ -186,10 +197,11 @@ impl AiRepository {
         transcription_id: Uuid,
     ) -> Result<Vec<AiSuggestedAction>> {
         let rows = sqlx::query(
-            r#"SELECT id, transcription_id, patient_id, action_type, payload_json, description, status, created_at, resolved_at
-               FROM ai_suggested_actions
-               WHERE transcription_id = $1 AND status = 'pending'
-               ORDER BY created_at ASC"#,
+            r#"SELECT a.id, a.transcription_id, a.patient_id, a.action_type, a.payload_json, a.description, a.status, a.created_at, a.resolved_at, t.transcript
+               FROM ai_suggested_actions a
+               JOIN transcriptions t ON t.id = a.transcription_id
+               WHERE a.transcription_id = $1 AND a.status = 'pending'
+               ORDER BY a.created_at ASC"#,
         )
         .bind(transcription_id)
         .fetch_all(&self.pool)
@@ -262,6 +274,7 @@ impl AiRepository {
             status: row.try_get("status")?,
             created_at: row.try_get("created_at")?,
             resolved_at: row.try_get("resolved_at")?,
+            transcript: row.try_get("transcript")?,
         })
     }
 }

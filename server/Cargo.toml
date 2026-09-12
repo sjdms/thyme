@@ -20,6 +20,22 @@ serde_json = { workspace = true }
 
 rand = "0.10.2"
 dotenvy = "0.15"
+
+# DICOM network receiver (server::dicom) — accepts C-STORE associations
+# directly from ophthalmic imaging/measurement devices on the clinic's
+# network (OCT topographers, auto-refractor/keratometers, etc.) and
+# ingests the standard IODs those devices produce. `dicom-ul` is the
+# upper-layer/association protocol, `dicom-object` decodes the DICOM
+# data sets themselves, `dicom-transfer-syntax-registry` resolves the
+# transfer syntax negotiated for each presentation context, and
+# `dicom-dictionary-std`/`dicom-core` back both of the above (tag
+# lookups, `Tag`/`VR`/`PrimitiveValue` types).
+dicom-core = "0.10.0"
+dicom-object = "0.10.0"
+dicom-ul = { version = "0.10.0", features = ["async"] }
+dicom-dictionary-std = "0.10.0"
+dicom-transfer-syntax-registry = "0.10.0"
+dicom-encoding = "0.10.0"
 sqlx = { version = "0.9.0", features = [
     "runtime-tokio",
     "postgres",

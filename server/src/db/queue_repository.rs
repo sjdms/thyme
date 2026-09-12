@@ -107,6 +107,29 @@ impl QueueRepository {
         rows.into_iter().map(Self::row_to_entry).collect()
     }
 
+    /// The queue entry currently `"with_doctor"`, if any — at most one
+    /// exists at a time (enforced by `ThymeServer` before it calls
+    /// `advance_status` with `"with_doctor"`; see the "only one patient
+    /// with the doctor at once" note on `PatientQueueAdvanceRequest`
+    /// handling in `server::server`). Used to look up *who* that is so
+    /// a doctor trying to start a second encounter can be told, rather
+    /// than just refused.
+    pub async fn current_with_doctor(&self) -> Result<Option<PatientQueueEntry>> {
+        let query = format!(
+            r#"
+            SELECT {ENTRY_COLUMNS}
+            FROM patient_queue q
+            JOIN patients p ON p.id = q.patient_id
+            WHERE q.status = 'with_doctor'
+            ORDER BY q.created_at ASC
+            LIMIT 1
+            "#
+        );
+
+        let row = sqlx::query(AssertSqlSafe(query)).fetch_optional(&self.pool).await?;
+        row.map(Self::row_to_entry).transpose()
+    }
+
     /// `true` if `patient_id` currently has a `"with_doctor"` entry in
     /// the queue — the server-side half of "voice recording should only
     /// work when there is a patient at the doctor's office"

@@ -9,6 +9,13 @@ use packets::{
         RejectSuggestedActionRequest, RejectSuggestedActionResponse, ResolveClarificationError,
         ResolveClarificationRequest, ResolveClarificationResponse, SuggestedActionRecord,
     },
+    device::{
+        ApplyDeviceSuggestionError, ApplyDeviceSuggestionRequest, ApplyDeviceSuggestionResponse,
+        DevicePatientItemsError, DevicePatientItemsRequest, DevicePatientItemsResponse,
+        DeviceSuggestedActionRecord, OctImageDataError, OctImageDataRequest, OctImageDataResponse,
+        OctImageRecord as OctImageRecordPacket, RejectDeviceSuggestionError,
+        RejectDeviceSuggestionRequest, RejectDeviceSuggestionResponse,
+    },
     auth::{
         AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket,
     },
@@ -35,12 +42,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ai::AiProcessor,
-    db::{
-        AiRepository, HistoryRepository, NewPatient, PatientRepository, QueueRepository,
-        UserRepository,
-    },
-    error::Result,
+    ai::AiProcessor, db::{
+        AiRepository, DeviceRepository, HistoryRepository, NewPatient, PatientRepository, QueueRepository, UserRepository,
+    }, error::Result,
 };
 
 /// Statuses a queue entry can be advanced through, in order. Shared
@@ -76,6 +80,14 @@ pub struct ThymeServer {
     pub queue_repo: QueueRepository,
     pub history_repo: HistoryRepository,
     pub ai_repo: AiRepository,
+    /// Data access for device-originated (DICOM) studies and staged
+    /// refraction suggestions — see `crate::dicom`. Backs the
+    /// `DevicePatientItemsRequest`/`ApplyDeviceSuggestionRequest`/
+    /// `RejectDeviceSuggestionRequest`/`OctImageDataRequest` handlers
+    /// below, the same way `ai_repo` backs the AI-suggestion review
+    /// packets.
+    pub device_repo: DeviceRepository,
+
     ai_processor: AiProcessor,
 
     stt_api_key: String,
@@ -103,6 +115,7 @@ impl ThymeServer {
             patient_repo: PatientRepository::new(db_pool.clone()),
             queue_repo: QueueRepository::new(db_pool.clone()),
             history_repo: HistoryRepository::new(db_pool.clone()),
+            device_repo: DeviceRepository::new(db_pool.clone()),
             ai_repo: AiRepository::new(db_pool),
             ai_processor: AiProcessor::from_env(),
             queue_changed,
@@ -433,6 +446,37 @@ impl ThymeServer {
                                     }
                                 });
 
+                            // Only one patient can be `"with_doctor"`
+                            // at a time — a doctor's dashboard only
+                            // shows/records against a single "in the
+                            // room now" patient (see
+                            // `QueueRepository::is_with_doctor`'s doc
+                            // comment), so letting a second entry into
+                            // that status would silently orphan
+                            // whichever one the UI stops tracking. This
+                            // is the trusted check (the client is
+                            // expected to warn the doctor and let them
+                            // end the current encounter first — see
+                            // `DoctorWindow.show-discard-confirm` — but
+                            // that's only ever a convenience; this is
+                            // what's actually enforced).
+                            let parsed = match parsed {
+                                Ok((queue_id, status)) if status == "with_doctor" => {
+                                    match self.queue_repo.current_with_doctor().await {
+                                        Ok(Some(existing)) if existing.id != queue_id => Err(format!(
+                                            "{} is currently with the doctor. End that encounter before starting a new one.",
+                                            existing.preferred_name.unwrap_or(existing.legal_name)
+                                        )),
+                                        Ok(_) => Ok((queue_id, status)),
+                                        Err(e) => {
+                                            eprintln!("{peer} queue with_doctor check failed: {e}");
+                                            Err("Could not update the queue. Please try again.".to_string())
+                                        }
+                                    }
+                                }
+                                other => other,
+                            };
+
                             match parsed {
                                 Ok((queue_id, status)) => match self.queue_repo.advance_status(queue_id, &status).await {
                                     Ok(_) => {
@@ -580,6 +624,104 @@ impl ThymeServer {
                                     client.write_packet(&ApplyAllSuggestedActionsError {
                                         transcription_id: request.transcription_id,
                                         message: "Unknown transcript.".to_string(),
+                                    }).await?;
+                                }
+                            }
+                        },
+                        
+                        DevicePatientItemsRequest::ID => {
+                            let request = match DevicePatientItemsRequest::decode(&mut PacketReader::new(&payload)) {
+                                Ok(request) => request,
+                                Err(e) => break Err(crate::error::ServerError::Packet(e)),
+                            };
+
+                            match Uuid::parse_str(&request.patient_id) {
+                                Ok(patient_id) => match self.list_device_items(patient_id).await {
+                                    Ok((oct_images, pending_suggestions)) => client.write_packet(&DevicePatientItemsResponse {
+                                        patient_id: request.patient_id,
+                                        oct_images,
+                                        pending_suggestions,
+                                    }).await?,
+                                    Err(message) => client.write_packet(&DevicePatientItemsError {
+                                        patient_id: request.patient_id,
+                                        message,
+                                    }).await?,
+                                },
+                                Err(_) => {
+                                    client.write_packet(&DevicePatientItemsError {
+                                        patient_id: request.patient_id,
+                                        message: "Unknown patient.".to_string(),
+                                    }).await?;
+                                }
+                            }
+                        },
+                        ApplyDeviceSuggestionRequest::ID => {
+                            let request = match ApplyDeviceSuggestionRequest::decode(&mut PacketReader::new(&payload)) {
+                                Ok(request) => request,
+                                Err(e) => break Err(crate::error::ServerError::Packet(e)),
+                            };
+
+                            match Uuid::parse_str(&request.suggestion_id) {
+                                Ok(suggestion_id) => match self.apply_device_suggestion(suggestion_id, &display_name).await {
+                                    Ok(summary) => client.write_packet(&ApplyDeviceSuggestionResponse {
+                                        suggestion_id: request.suggestion_id,
+                                        summary,
+                                    }).await?,
+                                    Err(message) => client.write_packet(&ApplyDeviceSuggestionError {
+                                        suggestion_id: request.suggestion_id,
+                                        message,
+                                    }).await?,
+                                },
+                                Err(_) => {
+                                    client.write_packet(&ApplyDeviceSuggestionError {
+                                        suggestion_id: request.suggestion_id,
+                                        message: "Unknown suggestion.".to_string(),
+                                    }).await?;
+                                }
+                            }
+                        },
+                        RejectDeviceSuggestionRequest::ID => {
+                            let request = match RejectDeviceSuggestionRequest::decode(&mut PacketReader::new(&payload)) {
+                                Ok(request) => request,
+                                Err(e) => break Err(crate::error::ServerError::Packet(e)),
+                            };
+
+                            match Uuid::parse_str(&request.suggestion_id) {
+                                Ok(suggestion_id) => match self.reject_device_suggestion(suggestion_id).await {
+                                    Ok(()) => client.write_packet(&RejectDeviceSuggestionResponse {
+                                        suggestion_id: request.suggestion_id,
+                                    }).await?,
+                                    Err(message) => client.write_packet(&RejectDeviceSuggestionError {
+                                        suggestion_id: request.suggestion_id,
+                                        message,
+                                    }).await?,
+                                },
+                                Err(_) => {
+                                    client.write_packet(&RejectDeviceSuggestionError {
+                                        suggestion_id: request.suggestion_id,
+                                        message: "Unknown suggestion.".to_string(),
+                                    }).await?;
+                                }
+                            }
+                        },
+                        OctImageDataRequest::ID => {
+                            let request = match OctImageDataRequest::decode(&mut PacketReader::new(&payload)) {
+                                Ok(request) => request,
+                                Err(e) => break Err(crate::error::ServerError::Packet(e)),
+                            };
+
+                            match Uuid::parse_str(&request.image_id) {
+                                Ok(image_id) => match self.read_oct_image(image_id).await {
+                                    Ok(response) => client.write_packet(&response).await?,
+                                    Err(message) => client.write_packet(&OctImageDataError {
+                                        image_id: request.image_id,
+                                        message,
+                                    }).await?,
+                                },
+                                Err(_) => {
+                                    client.write_packet(&OctImageDataError {
+                                        image_id: request.image_id,
+                                        message: "Unknown image.".to_string(),
                                     }).await?;
                                 }
                             }
@@ -796,7 +938,7 @@ impl ThymeServer {
 
             let record = match self
                 .ai_repo
-                .record_suggested_action(transcription_id, patient_id, action, status)
+                .record_suggested_action(transcription_id, patient_id, action, status, transcript)
                 .await
             {
                 Ok(record) => record,
@@ -924,7 +1066,7 @@ impl ThymeServer {
     async fn resolve_clarification(
         &self,
         suggestion_id: Uuid,
-        answer: &str,
+        raw_answer: &str,
     ) -> std::result::Result<(String, String), String> {
         let record = match self.ai_repo.get_needing_clarification(suggestion_id).await {
             Ok(Some(record)) => record,
@@ -940,7 +1082,34 @@ impl ThymeServer {
             "Could not resolve this clarification. Please try again.".to_string()
         })?;
 
-        action.resolve_clarification(answer);
+        // Pipe the raw answer through the AI action's own validation/normalization logic.
+        let patient = match self.patient_repo.get_by_id(record.patient_id).await {
+            Ok(Some(patient)) => patient,
+            Ok(None) => return Err("Unknown patient.".to_string()),
+            Err(e) => {
+                eprintln!("patient lookup failed while processing transcription: {e}");
+                return Err("Could not process the recording. Please try again.".to_string());
+            }
+        };
+
+        let history = match self.history_repo.fetch(record.patient_id).await {
+            Ok(history) => history,
+            Err(e) => {
+                eprintln!("history fetch failed while processing transcription: {e}");
+                return Err("Could not process the recording. Please try again.".to_string());
+            }
+        };
+
+        let answer = self
+            .ai_processor
+            .process_clarification_answer(&patient, &history, &record, &action, raw_answer)
+            .await
+            .map_err(|e| {
+                eprintln!("clarification answer validation failed for {suggestion_id}: {e}");
+                "Could not resolve this clarification. Please try again.".to_string()
+            })?;
+
+        action.resolve_clarification(&answer);
 
         let new_status = if action.auto_apply() {
             "applied"
@@ -1082,5 +1251,153 @@ impl ThymeServer {
         }
 
         Ok(results)
+    }
+
+    
+    /// Handles `DevicePatientItemsRequest`: everything device-originated
+    /// (`server::dicom`) on file for one patient — OCT images and any
+    /// refraction readings still awaiting review. Returns
+    /// `Err(message)` — suitable for `DevicePatientItemsError` — only
+    /// when a lookup itself fails; a patient with nothing on file yet
+    /// simply gets back two empty lists, not an error (most patients,
+    /// most of the time, since this only ever fills in once a device
+    /// has actually sent something for them).
+    async fn list_device_items(
+        &self,
+        patient_id: Uuid,
+    ) -> std::result::Result<(Vec<OctImageRecordPacket>, Vec<DeviceSuggestedActionRecord>), String> {
+        let oct_images = self.device_repo.list_oct_images_for_patient(patient_id).await.map_err(|e| {
+            eprintln!("failed to list OCT images for patient {patient_id}: {e}");
+            "Could not load this patient's imaging. Please try again.".to_string()
+        })?;
+
+        let pending = self.device_repo.list_pending_for_patient(patient_id).await.map_err(|e| {
+            eprintln!("failed to list pending device suggestions for patient {patient_id}: {e}");
+            "Could not load this patient's device readings. Please try again.".to_string()
+        })?;
+
+        let oct_images = oct_images
+            .into_iter()
+            .map(|image| OctImageRecordPacket {
+                image_id: image.id.to_string(),
+                eye: image.eye.unwrap_or_default(),
+                rows: image.rows.unwrap_or_default(),
+                columns: image.columns.unwrap_or_default(),
+                number_of_frames: image.number_of_frames.unwrap_or_default(),
+                acquisition_datetime: image
+                    .acquisition_datetime
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+            })
+            .collect();
+
+        let pending_suggestions = pending
+            .into_iter()
+            .map(|record| DeviceSuggestedActionRecord {
+                suggestion_id: record.id.to_string(),
+                action_type: record.action_type,
+                description: record.description,
+                payload_json: record.payload_json.to_string(),
+            })
+            .collect();
+
+        Ok((oct_images, pending_suggestions))
+    }
+
+    /// Handles `ApplyDeviceSuggestionRequest`: accepts one staged
+    /// refraction reading, writing it to the patient's chart with
+    /// `source = "device"` (see `RefractionEntry::source`'s doc
+    /// comment). Mirrors `apply_suggestion` exactly, aside from that
+    /// source label and reading from `device_repo` instead of
+    /// `ai_repo` — there's no auto-apply/clarification distinction to
+    /// carry over, since a device suggestion never has either (see
+    /// `db::DeviceRepository::record_suggested_action`'s doc comment).
+    async fn apply_device_suggestion(
+        &self,
+        suggestion_id: Uuid,
+        authored_by: &str,
+    ) -> std::result::Result<String, String> {
+        let record = match self.device_repo.get_pending(suggestion_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return Err("This suggestion was already resolved.".to_string()),
+            Err(e) => {
+                eprintln!("failed to look up device suggestion {suggestion_id}: {e}");
+                return Err("Could not apply this suggestion. Please try again.".to_string());
+            }
+        };
+
+        let action = record.to_action().map_err(|e| {
+            eprintln!("{e}");
+            "Could not apply this suggestion. Please try again.".to_string()
+        })?;
+
+        let summary = self
+            .history_repo
+            .apply_action(record.patient_id, Some(authored_by), "device", &action)
+            .await
+            .map_err(|e| {
+                eprintln!("failed to apply device suggestion {suggestion_id}: {e}");
+                "Could not apply this suggestion. Please try again.".to_string()
+            })?;
+
+        if let Err(e) = self.device_repo.resolve(suggestion_id, "applied").await {
+            // Mirrors `apply_suggestion`'s identical handling: the
+            // chart entry is already written at this point, so this is
+            // logged, not surfaced as a failure to the clinician.
+            eprintln!("applied device suggestion {suggestion_id} but failed to mark it resolved: {e}");
+        }
+
+        Ok(summary)
+    }
+
+    /// Handles `RejectDeviceSuggestionRequest`: dismisses one
+    /// still-`"pending"` device suggestion without ever touching the
+    /// patient's chart. Mirrors `reject_suggestion` exactly.
+    async fn reject_device_suggestion(&self, suggestion_id: Uuid) -> std::result::Result<(), String> {
+        match self.device_repo.get_pending(suggestion_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err("This suggestion was already resolved.".to_string()),
+            Err(e) => {
+                eprintln!("failed to look up device suggestion {suggestion_id}: {e}");
+                return Err("Could not dismiss this suggestion. Please try again.".to_string());
+            }
+        }
+
+        self.device_repo.resolve(suggestion_id, "rejected").await.map_err(|e| {
+            eprintln!("failed to reject device suggestion {suggestion_id}: {e}");
+            "Could not dismiss this suggestion. Please try again.".to_string()
+        })
+    }
+
+    /// Handles `OctImageDataRequest`: loads one OCT image's metadata
+    /// and reads its pixel bytes back off disk — `server::dicom::oct`
+    /// is what wrote them there in the first place, at the path this
+    /// looks up via `device_repo`. Returns `Err(message)` — suitable
+    /// for `OctImageDataError` — if the image is unknown or its file
+    /// can no longer be read (e.g. `DICOM_STORAGE_DIR` changed, or the
+    /// file was moved/deleted, since the image was received).
+    async fn read_oct_image(&self, image_id: Uuid) -> std::result::Result<OctImageDataResponse, String> {
+        let record = match self.device_repo.get_oct_image(image_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return Err("Unknown image.".to_string()),
+            Err(e) => {
+                eprintln!("failed to look up OCT image {image_id}: {e}");
+                return Err("Could not load this image. Please try again.".to_string());
+            }
+        };
+
+        let pixel_data = tokio::fs::read(&record.file_path).await.map_err(|e| {
+            eprintln!("failed to read OCT image file {}: {e}", record.file_path);
+            "Could not load this image's data. Please try again.".to_string()
+        })?;
+
+        Ok(OctImageDataResponse {
+            image_id: record.id.to_string(),
+            eye: record.eye.unwrap_or_default(),
+            rows: record.rows.unwrap_or_default(),
+            columns: record.columns.unwrap_or_default(),
+            number_of_frames: record.number_of_frames.unwrap_or_default(),
+            pixel_data,
+        })
     }
 }

@@ -283,6 +283,163 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
     prompt
 }
 
+/// Builds the prompt sent to the active `AiProvider` once a clinician
+/// has answered a `Clarification` attached to a previously-suggested
+/// action (see `Clarification` and `ThymeAction::clarification`).
+///
+/// Unlike `build_prompt`, this is not asking the model to propose
+/// something new — the action, and the exact question that was asked,
+/// already exist (`record.payload_json` / `action.clarification()`).
+/// The model's only job here is to translate the doctor's raw answer
+/// into the one value `ThymeAction::resolve_clarification` needs to
+/// fill the field the clarification was blocking. Two things make that
+/// non-trivial enough to route through the model rather than just
+/// using `raw_answer` verbatim (see `AiProcessor::process_clarification_answer`,
+/// which still independently validates whatever comes back):
+///
+///   - For `ClarificationAnswerType::SingleChoice`, the doctor's spoken
+///     answer rarely repeats one of `Clarification::choices` verbatim
+///     ("the timolol one" vs. `"Timolol 0.5%"`) — the model's job is to
+///     resolve that to the matching choice, exactly as written.
+///   - For `ClarificationAnswerType::Text`, the raw answer may still
+///     need light cleanup (stray filler words from STT) without
+///     changing its clinical content.
+pub fn build_clarification_prompt(
+    patient: &Patient,
+    history: &PatientHistory,
+    record: &crate::db::AiSuggestedAction,
+    action: &ThymeAction,
+    raw_answer: &str,
+) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str(
+        "You are a clinical scribe assistant embedded in an ophthalmology clinic's \
+        electronic health record system, Thyme. A doctor previously dictated a note, \
+        the AI proposed a chart action from it, and one field of that action was \
+        ambiguous enough that a clarifying question was attached to it. The doctor has \
+        now answered that question. Your job is to read the doctor's answer, in light of \
+        the original transcript, the proposed action, and the patient's chart, and \
+        resolve it to the exact value that clarification was asking for.\n\n",
+    );
+
+    prompt.push_str(
+        "## Hard rules — read carefully, these are non-negotiable\n\n\
+        1. You are resolving ONE clarification, not re-proposing the action. Do not \
+        change anything about the action other than the single field the clarification \
+        question was about.\n\
+        2. Base your answer strictly on what the doctor actually said in their answer \
+        below, read in light of the original transcript and patient history for context. \
+        Do not invent, infer, or extrapolate anything the doctor did not say.\n\
+        3. If `answer_type` is `\"single_choice\"`, you MUST resolve the doctor's answer \
+        to exactly one of the strings listed in `choices`, copied verbatim (same spelling, \
+        capitalization, and punctuation) — never a paraphrase, abbreviation, or a value \
+        outside that list. If the doctor's answer clearly does not match any of the \
+        `choices` (off-topic, unintelligible, refuses to answer, names something not \
+        listed), do not guess — respond with the exact JSON `{\"answer\": null}` instead \
+        of forcing a match.\n\
+        4. If `answer_type` is `\"text\"`, resolve the doctor's answer to a short, clean, \
+        properly capitalized piece of text expressing what they said — you may strip \
+        filler words or false starts introduced by speech-to-text, but do not change its \
+        clinical meaning or add anything the doctor didn't say. If the doctor's answer \
+        is empty, off-topic, or does not actually answer the question asked, respond with \
+        the exact JSON `{\"answer\": null}` instead of inventing one.\n\
+        5. Output ONLY valid JSON matching the schema given at the end of this prompt. \
+        No prose, no markdown code fences, no explanation before or after the JSON.\n\n",
+    );
+
+    prompt.push_str("## Patient\n\n");
+    prompt.push_str(&format!("- Name: {}\n", patient.legal_name));
+    if let Some(preferred) = &patient.preferred_name {
+        prompt.push_str(&format!("- Preferred name: {preferred}\n"));
+    }
+    if let Some(dob) = &patient.birth_date {
+        prompt.push_str(&format!("- Date of birth: {dob}\n"));
+    }
+    if let Some(sex) = &patient.sex {
+        prompt.push_str(&format!("- Sex: {sex}\n"));
+    }
+    prompt.push('\n');
+
+    prompt.push_str("## Patient history (context only)\n\n");
+    if history.is_empty() {
+        prompt.push_str("No prior history on file for this patient.\n\n");
+    } else {
+        push_section(
+            &mut prompt,
+            "Diagnoses",
+            history.diagnoses.iter().map(|d| {
+                let mut line = format!("id:{} — {}", d.id, d.diagnosis);
+                if let Some(code) = &d.code {
+                    line.push_str(&format!(" ({code})"));
+                }
+                line.push_str(&format!(" [{}]", d.status));
+                if let Some(notes) = &d.notes {
+                    line.push_str(&format!(" — notes: {notes}"));
+                }
+                line
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Current/past medications",
+            history.medications.iter().map(|m| {
+                let mut line = format!("id:{} — {}", m.id, m.name);
+                if let Some(dosage) = &m.dosage {
+                    line.push_str(&format!(" {dosage}"));
+                }
+                if let Some(frequency) = &m.frequency {
+                    line.push_str(&format!(", {frequency}"));
+                }
+                line.push_str(&format!(" [{}]", m.status));
+                line
+            }),
+        );
+    }
+
+    prompt.push_str("## Original proposed action (context only — do not re-derive it)\n\n");
+    let proposed_action = serde_json::to_string_pretty(&record.payload_json)
+        .unwrap_or_else(|_| record.payload_json.to_string());
+    prompt.push_str(&format!("```json\n{proposed_action}\n```\n\n"));
+
+    prompt.push_str("## Original transcript\n\n");
+    prompt.push_str("\"\"\"\n");
+    prompt.push_str(record.transcript.trim());
+    prompt.push_str("\n\"\"\"\n\n");
+
+    prompt.push_str("## The clarification that was asked\n\n");
+    if let Some(clarification) = action.clarification() {
+        prompt.push_str(&format!("- message: {}\n", clarification.message));
+        prompt.push_str(&format!(
+            "- answer_type: {}\n",
+            clarification.answer_type.as_str()
+        ));
+        if !clarification.choices.is_empty() {
+            prompt.push_str("- choices:\n");
+            for choice in &clarification.choices {
+                prompt.push_str(&format!("  - {choice}\n"));
+            }
+        }
+    }
+    prompt.push('\n');
+
+    prompt.push_str("## Doctor's answer to clarification\n\n");
+    prompt.push_str("\"\"\"\n");
+    prompt.push_str(raw_answer.trim());
+    prompt.push_str("\n\"\"\"\n\n");
+
+    prompt.push_str(
+        "## Required output format\n\n\
+        Respond with a single JSON object of exactly this shape, and nothing else:\n\n\
+        ```json\n\
+        {\n  \"answer\": \"<the resolved value, or null — see hard rules 3 and 4>\"\n}\n\
+        ```\n\n\
+        Remember hard rule 5: output ONLY the JSON object, with no surrounding text.\n",
+    );
+
+    prompt
+}
+
 /// Renders one history section as a `### Heading` followed by one
 /// bullet per entry, or nothing at all when `entries` is empty — so an
 /// absent history category doesn't pad the prompt with an empty

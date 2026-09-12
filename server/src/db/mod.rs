@@ -29,3 +29,8 @@ pub use history_repository::HistoryRepository;
 
 mod ai_repository;
 pub use ai_repository::{AiRepository, AiSuggestedAction};
+
+mod device_repository;
+pub use device_repository::{
+    DeviceRepository, DeviceStudy, DeviceSuggestedAction, NewDeviceStudy, NewOctImage, OctImageRecord,
+};

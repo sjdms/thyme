@@ -1,4 +1,9 @@
-import { ThymePalette, ThymeSpace, ThymeType, ThymeRadius } from "design/tokens.slint";
+import {
+    ThymePalette,
+    ThymeSpace,
+    ThymeType,
+    ThymeRadius,
+} from "design/tokens.slint";
 import { ThymeHeader } from "design/header.slint";
 import { ThymeSidebar, ThymeSidebarItem } from "design/sidebar.slint";
 import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
@@ -7,10 +12,19 @@ import { ThymeSettingsPanel } from "design/settings-panel.slint";
 import { ThymeConfirmDialog } from "design/confirm-dialog.slint";
 import { QueueEntryRow, QueueEntryCard } from "queue-entry-row.slint";
 import { SuggestionRow, ThymeSuggestionCard } from "suggestion-row.slint";
-import { PatientFileView, PatientRow, PatientFileData, PatientFileCard } from "patient-file-view.slint";
-export { QueueEntryRow } from "queue-entry-row.slint";
-export { SuggestionRow } from "suggestion-row.slint";
-export { PatientRow, HistoryEntryRow, PatientFileData } from "patient-file-view.slint";
+import {
+    PatientFileView,
+    PatientRow,
+    PatientFileData,
+    PatientFileCard,
+} from "patient-file-view.slint";
+export { QueueEntryRow }from "queue-entry-row.slint";
+export { SuggestionRow }from "suggestion-row.slint";
+export {
+    PatientRow,
+    HistoryEntryRow,
+    PatientFileData,
+}from "patient-file-view.slint";
 
 export component DoctorWindow inherits Window {
     title: "Thyme — Doctor";
@@ -36,14 +50,51 @@ export component DoctorWindow inherits Window {
     in property <bool> has-patient-with-doctor: false;
     in property <string> current-patient-id: "";
     in property <string> current-patient-name: "";
+    // Queue id (not patient id) of whoever is currently `with_doctor`,
+    // if anyone — needed alongside `current-patient-id` so "End
+    // encounter" can target the right `patient_queue` row via
+    // `queue-advance-requested`.
+    in property <string> current-queue-id: "";
+    // Queue id of the most-recently-registered `"waiting"` entry, or
+    // "" if no one is waiting — `queue-entries` is oldest-first (see
+    // `db::queue_repository::QueueRepository::list_active`), so this
+    // is computed Rust-side rather than re-deriving "last waiting" here.
+    in property <string> latest-waiting-queue-id: "";
+
+    // Set when starting a new encounter (either "Begin encounter" or a
+    // row's "Start visit") would require ending the one already in
+    // progress — see `next-status`/`action-label-for` above and the
+    // "only one patient with the doctor at once" server-side check
+    // this warns ahead of (`server::server`, `PatientQueueAdvanceRequest`
+    // handling).
+    property <bool> show-discard-confirm: false;
+    property <string> pending-start-queue-id: "";
+
+    function request-encounter-start(queue-id: string) {
+        if (root.has-patient-with-doctor && queue-id != root.current-queue-id) {
+            root.pending-start-queue-id = queue-id;
+            root.show-discard-confirm = true;
+        } else {
+            root.queue-advance-requested(queue-id, "with_doctor");
+        }
+    }
 
     in property <bool> current-patient-file-loading: false;
     in property <string> current-patient-file-error-text: "";
     in property <bool> current-patient-has-file: false;
     in property <PatientFileData> current-patient-file: {
-        patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
-        clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [], refractions: [],
+        patient-id: "",
+        legal-name: "",
+        preferred-name: "",
+        detail-line: "",
+        clinical-notes: [],
+        diagnoses: [],
+        follow-ups: [],
+        allergies: [],
+        medications: [],
+        lab-orders: [],
+        referrals: [],
+        refractions: [],
     };
 
     in property <string> transcription-state: "idle";
@@ -121,13 +172,21 @@ export component DoctorWindow inherits Window {
     in property <string> patients-file-error-text: "";
     in property <bool> patients-has-file: false;
     in property <PatientFileData> patients-file: {
-        patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
-        clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [], refractions: [],
+        patient-id: "",
+        legal-name: "",
+        preferred-name: "",
+        detail-line: "",
+        clinical-notes: [],
+        diagnoses: [],
+        follow-ups: [],
+        allergies: [],
+        medications: [],
+        lab-orders: [],
+        referrals: [],
+        refractions: [],
     };
     callback patients-search-edited(string);
     callback patients-patient-selected(string);
-
 
     scope := FocusScope {
         width: 100%;
@@ -207,7 +266,7 @@ export component DoctorWindow inherits Window {
                                 }
                             }
 
-                            Text {
+                            if !root.recording-active: Text {
                                 text: root.has-patient-with-doctor
                                     ? "Hold Ctrl+R anywhere in this window to record a voice note for " + root.current-patient-name + ". Release R to stop and transcribe."
                                     : "Start a patient's visit below (\"Start visit\") before recording a voice note — recording needs a patient in the room to attach the note to.";
@@ -215,6 +274,41 @@ export component DoctorWindow inherits Window {
                                 color: root.has-patient-with-doctor ? ThymePalette.text-secondary : ThymePalette.warning;
                                 wrap: word-wrap;
                             }
+
+                            /*if root.recording-active || root.recording-error-text != "": Rectangle {
+                                width: 100%;
+                                height: 100%;
+
+                                border-radius: ThymeRadius.lg;
+                                background: ThymePalette.danger-surface;
+                                border-width: 1px;
+                                border-color: ThymePalette.danger;
+                                drop-shadow-color: #00000022;
+                                drop-shadow-blur: 12px;
+                                drop-shadow-offset-y: 2px;
+
+                                HorizontalLayout {
+                                    padding: ThymeSpace.md;
+                                    spacing: ThymeSpace.sm;
+
+                                    if root.recording-active: Rectangle {
+                                        width: 10px;
+                                        height: 10px;
+                                        border-radius: 5px;
+                                        y: (parent.height - self.height) / 2;
+                                        background: ThymePalette.danger;
+                                    }
+
+                                    Text {
+                                        text: root.recording-active ? "Recording… release Ctrl+R to stop" : root.recording-error-text;
+                                        font-size: ThymeType.size-sm;
+                                        font-weight: 600;
+                                        color: ThymePalette.danger;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }*/
 
                             if root.queue-error-text != "": ThymeStatusChip {
                                 text: root.queue-error-text;
@@ -238,7 +332,11 @@ export component DoctorWindow inherits Window {
                                         show-action: root.next-status(entry.status) != "";
                                         action-label: root.action-label-for(entry.status);
                                         action-clicked => {
-                                            root.queue-advance-requested(entry.queue-id, root.next-status(entry.status));
+                                            if (root.next-status(entry.status) == "with_doctor") {
+                                                root.request-encounter-start(entry.queue-id);
+                                            } else {
+                                                root.queue-advance-requested(entry.queue-id, root.next-status(entry.status));
+                                            }
                                         }
                                     }
                                 }
@@ -309,9 +407,20 @@ export component DoctorWindow inherits Window {
                                             color: ThymePalette.accent;
                                             vertical-alignment: center;
                                         }
+
+                                        ThymeButton {
+                                            text: "End encounter";
+                                            kind: ThymeButtonKind.secondary;
+                                            width: 140px;
+                                            clicked => {
+                                                root.queue-advance-requested(root.current-queue-id, "done");
+                                            }
+                                        }
                                     }
 
-                                    Rectangle { height: ThymeSpace.sm; }
+                                    Rectangle {
+                                        height: ThymeSpace.sm;
+                                    }
 
                                     PatientFileCard {
                                         file: root.current-patient-file;
@@ -337,7 +446,6 @@ export component DoctorWindow inherits Window {
                     search-edited(query) => { root.patients-search-edited(query); }
                     patient-selected(id) => { root.patients-patient-selected(id); }
                 }
-
             }
         }
 
@@ -346,7 +454,7 @@ export component DoctorWindow inherits Window {
             height: 100%;
             background: #00000066;
 
-            TouchArea {}
+            TouchArea { }
 
             settings-scope := FocusScope {
                 key-pressed(event) => {
@@ -376,12 +484,63 @@ export component DoctorWindow inherits Window {
             }
         }
 
+        if root.show-discard-confirm: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea { }
+
+            discard-confirm-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.show-discard-confirm = false;
+                        root.pending-start-queue-id = "";
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        ThymeConfirmDialog {
+                            width: 360px;
+                            title: "End the current encounter?";
+                            message: root.current-patient-name + " is still with the doctor. Starting a new encounter will end their visit first.";
+                            confirm-label: "End visit & continue";
+                            cancel-label: "Cancel";
+                            danger: true;
+                            confirmed => {
+                                root.show-discard-confirm = false;
+                                root.queue-advance-requested(root.current-queue-id, "done");
+                                root.queue-advance-requested(root.pending-start-queue-id, "with_doctor");
+                                root.pending-start-queue-id = "";
+                            }
+                            cancelled => {
+                                root.show-discard-confirm = false;
+                                root.pending-start-queue-id = "";
+                            }
+                        }
+                    }
+                }
+
+                init => {
+                    discard-confirm-scope.focus();
+                }
+            }
+        }
+
         if root.show-sign-out-confirm: Rectangle {
             width: 100%;
             height: 100%;
             background: #00000066;
 
-            TouchArea {}
+            TouchArea { }
 
             confirm-scope := FocusScope {
                 key-pressed(event) => {
@@ -476,7 +635,7 @@ export component DoctorWindow inherits Window {
                 drop-shadow-blur: 20px;
                 drop-shadow-offset-x: -2px;
 
-                TouchArea {}
+                TouchArea { }
 
                 VerticalLayout {
                     padding: ThymeSpace.xl;

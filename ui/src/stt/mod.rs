@@ -1,4 +1,5 @@
 mod record;
+use async_recursion::async_recursion;
 pub use record::AudioRecorder;
 use reqwest::Client;
 use serde_json::Value;
@@ -20,7 +21,8 @@ impl STTInterface {
         }
     }
 
-    pub async fn transcribe_audio(&self, audio: Vec<u8>) -> Result<String> {
+    #[async_recursion]
+    pub async fn transcribe_audio(&self, audio: Vec<u8>, tries: usize) -> Result<String> {
 
         let response = self
             .http_client
@@ -30,10 +32,20 @@ impl STTInterface {
                 format!("Token {}", self.api_key),
             )
             .header(reqwest::header::CONTENT_TYPE, "audio/wav")
-            .body(audio)
+            .body(audio.clone())
             .send()
             .await?;
 
+        if response.status() != reqwest::StatusCode::OK {
+            if tries > 0 {
+                return self.transcribe_audio(audio, tries - 1).await;
+            }
+            
+            return Err(crate::error::ClientError::Generic(format!(
+                "Deepgram API error: {}", response.json().await.unwrap_or_else(|_| Value::String("Failed to parse error response".to_string())
+            ))));
+        }
+        
         let json_response: Value = response.json().await?;
 
         // The doctor window's transcription side panel needs a proper

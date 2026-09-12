@@ -556,6 +556,19 @@ fn listen_queue(
                     // the one that matters.
                     let with_doctor = entries.iter().find(|e| e.status == "with_doctor").cloned();
 
+                    // `entries` is oldest-first (see
+                    // `QueueRepository::list_active`), so the last
+                    // `"waiting"` entry is the most recently
+                    // registered one still waiting — what "Begin
+                    // encounter" (`DoctorWindow.latest-waiting-queue-id`)
+                    // starts.
+                    let latest_waiting = entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.status == "waiting")
+                        .map(|e| e.queue_id.clone())
+                        .unwrap_or_default();
+
                     let file_change = {
                         let mut tracked = tracking.lock().unwrap();
                         let new_id = with_doctor
@@ -578,10 +591,12 @@ fn listen_queue(
                         window.set_queue_entries(queue_service::to_queue_rows(&entries));
                         window.set_waiting_count(waiting_count);
                         window.set_queue_error_text("".into());
+                        window.set_latest_waiting_queue_id(latest_waiting.into());
 
                         match with_doctor {
                             Some(entry) => {
                                 window.set_has_patient_with_doctor(true);
+                                window.set_current_queue_id(entry.queue_id.into());
                                 window.set_current_patient_id(entry.patient_id.into());
                                 window.set_current_patient_name(
                                     entry.preferred_name.unwrap_or(entry.legal_name).into(),
@@ -589,6 +604,7 @@ fn listen_queue(
                             }
                             None => {
                                 window.set_has_patient_with_doctor(false);
+                                window.set_current_queue_id("".into());
                                 window.set_current_patient_id("".into());
                                 window.set_current_patient_name("".into());
                             }
@@ -1228,7 +1244,7 @@ impl DoctorController {
         tokio::spawn(async move {
             let result = {
                 let guard = transcriber.lock().await;
-                guard.transcribe_audio(audio).await
+                guard.transcribe_audio(audio, 3).await
             };
 
             // Store the boolean before `result` is consumed by the closure below
@@ -1403,7 +1419,7 @@ impl DoctorController {
         tokio::spawn(async move {
             let result = {
                 let guard = transcriber.lock().await;
-                guard.transcribe_audio(audio).await
+                guard.transcribe_audio(audio, 3).await
             };
 
             match result {

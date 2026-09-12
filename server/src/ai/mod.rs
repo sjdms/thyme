@@ -8,7 +8,7 @@ pub use gemini::GeminiProvider;
 pub use local::LocalProvider;
 pub use provider::AiProvider;
 
-use domain::action::ThymeAction;
+use domain::action::{ClarificationAnswerType, ThymeAction};
 use domain::patient::{Patient, PatientHistory};
 use serde::Deserialize;
 
@@ -113,6 +113,119 @@ impl AiProcessor {
         let actions = parse_actions_from_response(&raw_response)?;
         Ok((actions, raw_response))
     }
+
+    /// Resolves a clinician's raw answer to a `Clarification` down to
+    /// the exact value `ThymeAction::resolve_clarification` should fill
+    /// the blocked field with (see `prompt::build_clarification_prompt`
+    /// for why this goes through the model at all rather than just
+    /// using `raw_answer` verbatim).
+    ///
+    /// This is the one place in the pipeline where trusting the model's
+    /// output at face value would be a real problem rather than just an
+    /// imperfect suggestion: a `SingleChoice` clarification exists
+    /// specifically to key off of an exact, known-good value (a
+    /// `medication_id`-bearing name, say), and `resolve_clarification`
+    /// downstream writes whatever string comes back here straight onto
+    /// the chart. So — unlike `process_transcription`, which lets a
+    /// malformed individual action get silently dropped
+    /// (`parse_actions_from_response`) because the worst case is just a
+    /// missed suggestion — a malformed or off-menu answer here is
+    /// rejected outright as an error rather than passed through:
+    ///
+    ///   - For `ClarificationAnswerType::SingleChoice`, the resolved
+    ///     answer must match one of `Clarification::choices` exactly
+    ///     (byte-for-byte, after trimming). Anything else — the model
+    ///     paraphrasing, inventing an option that wasn't offered, or
+    ///     legitimately reporting `null` because the doctor's answer
+    ///     didn't match any choice — is an error, never silently
+    ///     coerced to "closest choice" or accepted verbatim.
+    ///   - For `ClarificationAnswerType::Text`, the only requirement is
+    ///     that the model actually returned some non-empty text rather
+    ///     than `null`.
+    pub async fn process_clarification_answer(
+        &self,
+        patient: &Patient,
+        history: &PatientHistory,
+        record: &crate::db::AiSuggestedAction,
+        action: &ThymeAction,
+        raw_answer: &str,
+    ) -> Result<String> {
+        let clarification = action.clarification().ok_or_else(|| {
+            ServerError::Ai(format!(
+                "suggestion {} has no clarification to resolve",
+                record.id
+            ))
+        })?;
+
+        let prompt = prompt::build_clarification_prompt(patient, history, record, action, raw_answer);
+        let raw_response = self.provider.generate(&prompt).await?;
+        let resolved = parse_clarification_answer(&raw_response)?;
+
+        let resolved = match resolved {
+            Some(answer) if !answer.trim().is_empty() => answer.trim().to_string(),
+            _ => {
+                return Err(ServerError::Ai(format!(
+                    "AI could not resolve the doctor's answer to clarification for suggestion {} \
+                     (raw answer: {raw_answer:?})",
+                    record.id
+                )));
+            }
+        };
+
+        match clarification.answer_type {
+            ClarificationAnswerType::SingleChoice => {
+                if !clarification
+                    .choices
+                    .iter()
+                    .any(|choice| choice == &resolved)
+                {
+                    return Err(ServerError::Ai(format!(
+                        "AI's resolved answer {resolved:?} for suggestion {} did not exactly \
+                         match any of the offered choices {:?}",
+                        record.id, clarification.choices
+                    )));
+                }
+            }
+            ClarificationAnswerType::Text => {
+                // Any non-empty text is acceptable — already enforced
+                // above.
+            }
+        }
+
+        Ok(resolved)
+    }
+}
+
+/// Response envelope this pipeline asks the model for when resolving a
+/// clarification — see `prompt::build_clarification_prompt`'s "Required
+/// output format" section: `{"answer": ... }`, where the value is
+/// either a string or JSON `null` (the model's own signal that it
+/// couldn't confidently resolve the doctor's answer — see hard rules 3
+/// and 4 there).
+#[derive(Debug, Deserialize)]
+struct ClarificationAnswerEnvelope {
+    answer: Option<String>,
+}
+
+/// Parses a model's raw text response to a clarification-resolution
+/// prompt. Tolerant of the same code-fence wrapping
+/// `parse_actions_from_response` guards against, for the same reason —
+/// models add one despite being told not to.
+///
+/// Returns `Ok(None)` for an explicit `{"answer": null}` (the model
+/// declining to resolve, per hard rules 3/4 in
+/// `prompt::build_clarification_prompt`) as a normal outcome, not a
+/// parse failure. Only genuinely malformed JSON is an `Err`.
+fn parse_clarification_answer(raw: &str) -> Result<Option<String>> {
+    let cleaned = strip_code_fence(raw.trim());
+
+    let envelope: ClarificationAnswerEnvelope = serde_json::from_str(cleaned).map_err(|e| {
+        ServerError::Ai(format!(
+            "AI clarification response was not valid JSON matching {{\"answer\": ...}} ({e}): {cleaned}"
+        ))
+    })?;
+
+    Ok(envelope.answer)
 }
 
 /// Response envelope this pipeline asks the model for — see

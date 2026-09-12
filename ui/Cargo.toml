@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 build = "src/build.rs"
 
+[profile.release]
+debug = true
+
 [dependencies]
 tokio = { workspace = true }
 slint = { workspace = true }
@@ -20,6 +23,8 @@ domain = { path = "../common/domain" }
 cpal = "0.18.2"
 hound = "3.5.1"
 tempfile = "3.16.0"
+async-recursion = "1.1.1"
+
 serde_json = { workspace = true }
 
 [build-dependencies]

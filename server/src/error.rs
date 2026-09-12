@@ -22,6 +22,9 @@ pub enum ServerError {
 
     #[error("AI error: {0}")]
     Ai(String),
+
+    #[error("DICOM error: {0}")]
+    Dicom(String),
 }
 
 pub type Result<T> = std::result::Result<T, ServerError>;
