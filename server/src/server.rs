@@ -9,15 +9,15 @@ use packets::{
         RejectSuggestedActionRequest, RejectSuggestedActionResponse, ResolveClarificationError,
         ResolveClarificationRequest, ResolveClarificationResponse, SuggestedActionRecord,
     },
+    auth::{
+        AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket,
+    },
     device::{
         ApplyDeviceSuggestionError, ApplyDeviceSuggestionRequest, ApplyDeviceSuggestionResponse,
         DevicePatientItemsError, DevicePatientItemsRequest, DevicePatientItemsResponse,
         DeviceSuggestedActionRecord, OctImageDataError, OctImageDataRequest, OctImageDataResponse,
         OctImageRecord as OctImageRecordPacket, RejectDeviceSuggestionError,
         RejectDeviceSuggestionRequest, RejectDeviceSuggestionResponse,
-    },
-    auth::{
-        AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket,
     },
     hello::{Hello, HelloOperationMode},
     keepalive::{PING_PACKET, Pong},
@@ -42,9 +42,12 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ai::AiProcessor, db::{
-        AiRepository, DeviceRepository, HistoryRepository, NewPatient, PatientRepository, QueueRepository, UserRepository,
-    }, error::Result,
+    ai::AiProcessor,
+    db::{
+        AiRepository, DeviceRepository, HistoryRepository, NewPatient, OctImageRecord,
+        PatientRepository, QueueRepository, UserRepository,
+    },
+    error::Result,
 };
 
 /// Statuses a queue entry can be advanced through, in order. Shared
@@ -87,7 +90,6 @@ pub struct ThymeServer {
     /// below, the same way `ai_repo` backs the AI-suggestion review
     /// packets.
     pub device_repo: DeviceRepository,
-
     ai_processor: AiProcessor,
 
     stt_api_key: String,
@@ -101,10 +103,46 @@ pub struct ThymeServer {
     /// source of truth (the database) instead of racing to keep N
     /// in-memory copies consistent.
     queue_changed: broadcast::Sender<()>,
+
+    /// The device-ingestion pipeline's (`crate::dicom`) counterpart to
+    /// `queue_changed` — fires with a patient id whenever a DICOM study
+    /// lands on that patient's chart (see `dicom::oct`/`dicom::refraction`).
+    /// Needed for a reason `queue_changed` isn't: `crate::dicom::DicomScp`
+    /// runs as its own listener on its own port (see `main.rs`),
+    /// entirely outside the request/response loop below, so without
+    /// this there would be no way for a client already viewing a
+    /// patient (most commonly the Dashboard's "in the room now" panel —
+    /// exactly when a device is likely to be actively scanning them) to
+    /// ever learn new data arrived for them, short of switching away
+    /// and back. Carries a patient id rather than `()` since — unlike
+    /// the queue, which is one global list every client shows in full —
+    /// device data is per patient, and the server has no notion of
+    /// "which patient is this client currently looking at" to decide
+    /// who needs a push; every client's task gets every tick and
+    /// reapplies the exact same is-this-relevant-to-me check
+    /// `DevicePatientItemsRequest`'s handler already needs regardless
+    /// (`list_device_items` takes a `patient_id`; the id here just
+    /// tells a client which patient to ask about, the same as if it had
+    /// decided to ask on its own).
+    device_items_changed: broadcast::Sender<String>,
 }
 
 impl ThymeServer {
     pub fn new(listen_addr: SocketAddr, db_pool: Pool<sqlx::Postgres>) -> Self {
+        Self::with_device_items_changed(listen_addr, db_pool, broadcast::channel(16).0)
+    }
+
+    /// Like `new`, but sharing an existing `device_items_changed`
+    /// sender rather than creating one of its own — what `main.rs`
+    /// calls, so the same sender can also be handed to
+    /// `dicom::DicomScp::from_env`. `new` above stays the plain,
+    /// no-DICOM-awareness constructor other tests/tools can keep using
+    /// without needing to know this channel exists.
+    pub fn with_device_items_changed(
+        listen_addr: SocketAddr,
+        db_pool: Pool<sqlx::Postgres>,
+        device_items_changed: broadcast::Sender<String>,
+    ) -> Self {
         let (queue_changed, _) = broadcast::channel(16);
 
         Self {
@@ -115,10 +153,11 @@ impl ThymeServer {
             patient_repo: PatientRepository::new(db_pool.clone()),
             queue_repo: QueueRepository::new(db_pool.clone()),
             history_repo: HistoryRepository::new(db_pool.clone()),
-            device_repo: DeviceRepository::new(db_pool.clone()),
-            ai_repo: AiRepository::new(db_pool),
+            ai_repo: AiRepository::new(db_pool.clone()),
+            device_repo: DeviceRepository::new(db_pool),
             ai_processor: AiProcessor::from_env(),
             queue_changed,
+            device_items_changed,
 
             stt_api_key: std::env::var("STT_API_KEY").expect("STT_API_KEY must be set"),
         }
@@ -237,6 +276,7 @@ impl ThymeServer {
             Err(e) => eprintln!("{peer} initial queue snapshot failed: {e}"),
         }
         let mut queue_rx = self.queue_changed.subscribe();
+        let mut device_items_rx = self.device_items_changed.subscribe();
 
         let mut ping_interval = interval(Duration::from_secs(5));
         ping_interval.tick().await;
@@ -266,6 +306,40 @@ impl ThymeServer {
                         // instead of one packet per missed notification —
                         // the snapshot is always the full current state
                         // anyway, so there's nothing to catch up on.
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
+
+                device_notice = device_items_rx.recv() => {
+                    match device_notice {
+                        Ok(patient_id) => match Uuid::parse_str(&patient_id) {
+                            Ok(patient_id) => match self.list_device_items(patient_id).await {
+                                Ok((oct_images, pending_suggestions)) => {
+                                    client.write_packet(&DevicePatientItemsResponse {
+                                        patient_id: patient_id.to_string(),
+                                        oct_images,
+                                        pending_suggestions,
+                                    }).await?
+                                }
+                                // Unlike the on-demand handler below,
+                                // there's no request to answer with a
+                                // `DevicePatientItemsError` for — a
+                                // failed unsolicited refresh just means
+                                // this client's view is a beat behind
+                                // until the next change, not that
+                                // anything the client did failed.
+                                Err(e) => eprintln!("{peer} device items push failed: {e}"),
+                            },
+                            // Every id this ever carries came from
+                            // `dicom::oct`/`dicom::refraction` calling
+                            // `Uuid::to_string()` on a real
+                            // `patients.id`, so this is unreachable in
+                            // practice — guarded rather than unwrapped
+                            // only because nothing enforces that at the
+                            // type level across the two crates.
+                            Err(_) => {}
+                        },
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
@@ -628,7 +702,6 @@ impl ThymeServer {
                                 }
                             }
                         },
-                        
                         DevicePatientItemsRequest::ID => {
                             let request = match DevicePatientItemsRequest::decode(&mut PacketReader::new(&payload)) {
                                 Ok(request) => request,
@@ -1253,7 +1326,6 @@ impl ThymeServer {
         Ok(results)
     }
 
-    
     /// Handles `DevicePatientItemsRequest`: everything device-originated
     /// (`server::dicom`) on file for one patient — OCT images and any
     /// refraction readings still awaiting review. Returns

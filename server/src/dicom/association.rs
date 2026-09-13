@@ -33,9 +33,11 @@ use dicom_core::{DataElement, PrimitiveValue, VR};
 use dicom_encoding::TransferSyntaxIndex;
 use dicom_object::InMemDicomObject;
 use dicom_transfer_syntax_registry::entries::{EXPLICIT_VR_LITTLE_ENDIAN, IMPLICIT_VR_LITTLE_ENDIAN};
+use dicom_ul::association::Association;
 use dicom_ul::pdu::{PDataValue, PDataValueType};
 use dicom_ul::{Pdu, association::server::ServerAssociationOptions};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 
 use crate::db::{DeviceRepository, PatientRepository};
 use crate::error::{Result, ServerError};
@@ -51,6 +53,14 @@ pub struct DicomScp {
     store_dir: PathBuf,
     patient_repo: PatientRepository,
     device_repo: DeviceRepository,
+    /// Shared with `ThymeServer` (created once in `main.rs` and cloned
+    /// into both) so that a study landing on a patient a connected
+    /// client is already viewing shows up without that client having
+    /// to do anything to notice — see
+    /// `server::ThymeServer::device_items_changed`'s doc comment for
+    /// the full reasoning, and `oct::ingest`/`refraction::ingest` for
+    /// where this actually fires.
+    device_items_changed: broadcast::Sender<String>,
 }
 
 impl DicomScp {
@@ -60,8 +70,9 @@ impl DicomScp {
         store_dir: PathBuf,
         patient_repo: PatientRepository,
         device_repo: DeviceRepository,
+        device_items_changed: broadcast::Sender<String>,
     ) -> Self {
-        Self { listen_addr, ae_title, store_dir, patient_repo, device_repo }
+        Self { listen_addr, ae_title, store_dir, patient_repo, device_repo, device_items_changed }
     }
 
     /// Builds a `DicomScp` from environment configuration:
@@ -73,7 +84,11 @@ impl DicomScp {
     ///   to be configured to call it by this name.
     /// - `DICOM_STORAGE_DIR` (default `./dicom-storage`) — where OCT
     ///   pixel data is written; see `oct::image_path`.
-    pub fn from_env(patient_repo: PatientRepository, device_repo: DeviceRepository) -> Self {
+    pub fn from_env(
+        patient_repo: PatientRepository,
+        device_repo: DeviceRepository,
+        device_items_changed: broadcast::Sender<String>,
+    ) -> Self {
         let listen_addr = std::env::var("DICOM_LISTEN_ADDR")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -81,7 +96,7 @@ impl DicomScp {
         let ae_title = std::env::var("DICOM_AE_TITLE").unwrap_or_else(|_| "THYME-SCP".to_string());
         let store_dir = std::env::var("DICOM_STORAGE_DIR").unwrap_or_else(|_| "./dicom-storage".to_string()).into();
 
-        Self::new(listen_addr, ae_title, store_dir, patient_repo, device_repo)
+        Self::new(listen_addr, ae_title, store_dir, patient_repo, device_repo, device_items_changed)
     }
 
     pub async fn run(self: Arc<Self>) -> Result<()> {
@@ -123,7 +138,7 @@ impl DicomScp {
         // (`device_studies.device_ae_title`) — nothing in ingestion
         // logic depends on its exact value, so a wrong accessor name
         // here is a one-line fix, not a design problem.
-        let calling_ae_title = association.called_ae_title().to_string();
+        let calling_ae_title = association.peer_ae_title().to_string();
 
         loop {
             match association.receive().await {
@@ -198,7 +213,7 @@ impl DicomScp {
             return Ok(());
         }
 
-        let message_id = command.element(tags::MESSAGE_ID).ok().and_then(|e| e.to_int().ok()).unwrap_or(1);
+        let message_id = command.element(tags::MESSAGE_ID).ok().and_then(|e| e.to_int::<i32>().ok()).unwrap_or(1);
         let affected_sop_class_uid = command
             .element(tags::AFFECTED_SOP_CLASS_UID)
             .ok()
@@ -214,8 +229,8 @@ impl DicomScp {
         let has_dataset = command
             .element(tags::COMMAND_DATA_SET_TYPE)
             .ok()
-            .and_then(|e| e.to_int().ok())
-            .map(|v: u16| v as u16 != tags::COMMAND_DATA_SET_TYPE_NONE)
+            .and_then(|e| e.to_int::<u16>().ok())
+            .map(|v: u16 | v as u16 != tags::COMMAND_DATA_SET_TYPE_NONE)
             .unwrap_or(false);
 
         // -- Data set (the actual DICOM instance being stored) -------
@@ -275,10 +290,25 @@ impl DicomScp {
 
         match sop_class::SopClassKind::from_uid(&sop_class_uid) {
             Some(sop_class::SopClassKind::OphthalmicTomographyImage) => {
-                oct::ingest(object, calling_ae_title, &self.store_dir, &self.patient_repo, &self.device_repo).await
+                oct::ingest(
+                    object,
+                    calling_ae_title,
+                    &self.store_dir,
+                    &self.patient_repo,
+                    &self.device_repo,
+                    &self.device_items_changed,
+                )
+                .await
             }
             Some(sop_class::SopClassKind::AutorefractionMeasurements) => {
-                refraction::ingest(object, calling_ae_title, &self.patient_repo, &self.device_repo).await
+                refraction::ingest(
+                    object,
+                    calling_ae_title,
+                    &self.patient_repo,
+                    &self.device_repo,
+                    &self.device_items_changed,
+                )
+                .await
             }
             None => {
                 // Negotiation only ever offers the SOP Classes in

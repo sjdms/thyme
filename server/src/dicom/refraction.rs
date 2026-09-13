@@ -11,6 +11,7 @@
 //! `HistoryRepository::apply_action` before it's chart fact.
 
 use dicom_object::InMemDicomObject;
+use tokio::sync::broadcast;
 
 use domain::action::ThymeAction;
 
@@ -21,12 +22,14 @@ use super::{patient_match, tags, util};
 
 /// Decodes one Autorefraction Measurements instance and stages an
 /// `AddRefraction` suggestion for each populated eye. `calling_ae_title`
-/// is passed through for the same reason as in `super::oct::ingest`.
+/// is passed through for the same reason as in `super::oct::ingest`;
+/// `device_items_changed` likewise — see that function's doc comment.
 pub async fn ingest(
     obj: &InMemDicomObject,
     calling_ae_title: &str,
     patient_repo: &PatientRepository,
     device_repo: &DeviceRepository,
+    device_items_changed: &broadcast::Sender<String>,
 ) -> Result<()> {
     let sop_instance_uid = util::str_value(obj, tags::SOP_INSTANCE_UID)
         .ok_or_else(|| ServerError::Dicom("refraction instance has no SOP Instance UID".to_string()))?;
@@ -78,6 +81,9 @@ pub async fn ingest(
     }
 
     device_repo.mark_matched(study.id, patient_id, "pending_review").await?;
+    // Best-effort — see `oct::ingest`'s identical call for why a
+    // failed send here is fine to ignore.
+    let _ = device_items_changed.send(patient_id.to_string());
 
     Ok(())
 }

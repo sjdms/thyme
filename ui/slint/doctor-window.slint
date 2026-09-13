@@ -95,7 +95,23 @@ export component DoctorWindow inherits Window {
         lab-orders: [],
         referrals: [],
         refractions: [],
+        oct-images: [],
+        pending-device-suggestions: [],
     };
+
+    // Device-originated (DICOM) UI plumbing shared by both
+    // `PatientFileCard`/`PatientFileView` instantiations below (the
+    // dashboard's "in the room now" panel and the "Patients" tab) —
+    // see `controllers::doctor::listen_device`. One shared
+    // `oct-status-text`/`device-status-text` pair is a deliberate
+    // simplification: only one image save or suggestion review is ever
+    // realistically in flight at a time, so it isn't worth threading a
+    // separate status per panel.
+    in property <string> oct-status-text: "";
+    in property <string> device-status-text: "";
+    callback save-oct-image(string);
+    callback device-suggestion-accepted(string);
+    callback device-suggestion-rejected(string);
 
     in property <string> transcription-state: "idle";
     in property <string> last-transcript: "";
@@ -184,6 +200,8 @@ export component DoctorWindow inherits Window {
         lab-orders: [],
         referrals: [],
         refractions: [],
+        oct-images: [],
+        pending-device-suggestions: [],
     };
     callback patients-search-edited(string);
     callback patients-patient-selected(string);
@@ -424,6 +442,11 @@ export component DoctorWindow inherits Window {
 
                                     PatientFileCard {
                                         file: root.current-patient-file;
+                                        oct-status-text: root.oct-status-text;
+                                        device-status-text: root.device-status-text;
+                                        save-oct-image(image-id) => { root.save-oct-image(image-id); }
+                                        accept-device-suggestion(id) => { root.device-suggestion-accepted(id); }
+                                        reject-device-suggestion(id) => { root.device-suggestion-rejected(id); }
                                     }
                                 }
                             }
@@ -443,6 +466,11 @@ export component DoctorWindow inherits Window {
                     file-error-text: root.patients-file-error-text;
                     has-file: root.patients-has-file;
                     file: root.patients-file;
+                    oct-status-text: root.oct-status-text;
+                    device-status-text: root.device-status-text;
+                    save-oct-image(image-id) => { root.save-oct-image(image-id); }
+                    accept-device-suggestion(id) => { root.device-suggestion-accepted(id); }
+                    reject-device-suggestion(id) => { root.device-suggestion-rejected(id); }
                     search-edited(query) => { root.patients-search-edited(query); }
                     patient-selected(id) => { root.patients-patient-selected(id); }
                 }

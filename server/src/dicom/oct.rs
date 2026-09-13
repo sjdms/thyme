@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use dicom_object::InMemDicomObject;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::db::{DeviceRepository, NewDeviceStudy, NewOctImage, PatientRepository};
@@ -29,12 +30,21 @@ use super::{patient_match, tags, util};
 /// hands this along from the DICOM UL association, not from anything
 /// inside the data set itself, since Calling AE Title is an
 /// association-level detail, not a data-set attribute).
+///
+/// `device_items_changed` is fired once this instance is matched to a
+/// patient — see `server::ThymeServer::device_items_changed`'s doc
+/// comment for why this exists at all: without it, a client already
+/// viewing this patient (most commonly the Dashboard's "in the room
+/// now" panel, since that's exactly when a device is likely to be
+/// actively scanning them) would have no way to learn this image
+/// arrived until something else happened to make it re-fetch.
 pub async fn ingest(
     obj: &InMemDicomObject,
     calling_ae_title: &str,
     store_dir: &Path,
     patient_repo: &PatientRepository,
     device_repo: &DeviceRepository,
+    device_items_changed: &broadcast::Sender<String>,
 ) -> Result<()> {
     let sop_instance_uid = util::str_value(obj, tags::SOP_INSTANCE_UID)
         .ok_or_else(|| ServerError::Dicom("OCT instance has no SOP Instance UID".to_string()))?;
@@ -95,6 +105,11 @@ pub async fn ingest(
         .await?;
 
     device_repo.mark_matched(study.id, patient_id, "applied").await?;
+    // Best-effort: no subscribers (no client currently connected) is
+    // routine, not an error — same reasoning as every other `let _ =
+    // ...send(...)` in this codebase (see `ThymeServer::queue_changed`'s
+    // usages).
+    let _ = device_items_changed.send(patient_id.to_string());
 
     Ok(())
 }

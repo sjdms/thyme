@@ -185,6 +185,13 @@ pub enum ThymeAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clarification: Option<Clarification>,
     },
+
+    /*#[action_description("Marks the end of a patient's visit to the doctor, fire it when the doctor says something like `End the visit` or `That's all for today`. This action is not clinical, the AI should provide a summary of the visit and any follow-up instructions, but it should not add any new diagnoses, medications, or other chart entries unless explicitly required. It is purely administrative.")]
+    EndVisit {
+        summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clarification: Option<Clarification>,
+    }*/
 }
 
 impl ThymeAction {
@@ -209,6 +216,7 @@ impl ThymeAction {
             ThymeAction::DiscontinueMedication { .. } => "DiscontinueMedication",
             ThymeAction::UpdateDiagnosis { .. } => "UpdateDiagnosis",
             ThymeAction::DeleteDiagnosis { .. } => "DeleteDiagnosis",
+            //ThymeAction::EndVisit { .. } => "EndVisit",
         }
     }
 
@@ -275,6 +283,7 @@ impl ThymeAction {
             ThymeAction::DiscontinueMedication { clarification, .. } => clarification.as_ref(),
             ThymeAction::UpdateDiagnosis { clarification, .. } => clarification.as_ref(),
             ThymeAction::DeleteDiagnosis { clarification, .. } => clarification.as_ref(),
+            //ThymeAction::EndVisit { clarification, .. } => clarification.as_ref(),
         }
     }
 
@@ -399,7 +408,13 @@ impl ThymeAction {
                     *diagnosis_id = id;
                 }
                 clarification
-            }
+            },
+            /*ThymeAction::EndVisit { clarification, .. } => {
+                if clarification.is_none() {
+                    return;
+                }
+                clarification
+            }*/
         };
         *slot = None;
     }
@@ -487,6 +502,11 @@ impl ThymeAction {
                 Some(reason) => format!("Remove diagnosis — reason: {reason}"),
                 None => "Remove diagnosis".to_string(),
             },
+            /*ThymeAction::EndVisit { summary, clarification } => match (summary, clarification) {
+                (Some(summary), _) => format!("End visit — summary: {summary}"),
+                (None, Some(clarification)) => format!("End visit — clarification: {}", clarification.message),
+                (None, None) => "End visit".to_string(),
+            },*/
         }
     }
 }

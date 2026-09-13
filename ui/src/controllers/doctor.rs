@@ -20,18 +20,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use slint::{ComponentHandle, Model};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use packets::ai::SuggestedActionRecord;
 
 use crate::services::ai_service::{self, AiService, AiUpdate};
 use crate::services::connection::Connection;
+use crate::services::device_service::{self, DeviceService, DeviceUpdate};
 use crate::services::patient_service::{self, PatientSearchUpdate, PatientService};
 use crate::services::queue_service::{self, QueueService, QueueUpdate};
 use crate::services::settings_service::Settings;
 use crate::services::stt_service::STTService;
 use crate::stt::{AudioRecorder, STTInterface};
-use crate::{DoctorWindow, PatientFileData, ThymeChipTone};
+use crate::{DoctorWindow, PatientFileData, SuggestionRow, ThymeChipTone};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The AI review panel's authoritative state — the full list of
@@ -198,6 +199,12 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     // server through subtly different paths.
     let patient_service = Arc::new(PatientService::new(connection.clone()));
     let patient_tracking = Arc::new(Mutex::new(PatientFileTrackingState::default()));
+    // The device-ingestion pipeline's (`server::dicom`) counterpart to
+    // `patient_service` — created alongside it and shared the same
+    // tracking state, since both are keyed off exactly the same two
+    // "which patient is this for" contexts (the Dashboard's "in the
+    // room now" panel and the "Patients" tab's selection).
+    let device_service = Arc::new(DeviceService::new(connection.clone()));
 
     // Subscribed before `listen_queue` below — and before anything else
     // in `install` — for the same reason `listen_queue` itself wants to
@@ -216,7 +223,24 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     // very first auto-fetched chart's response arrives with no
     // subscriber and is silently dropped — the dashboard is then stuck
     // on "Loading ... chart…" until the room changes again.
-    listen_patients(patient_service.clone(), patient_tracking.clone(), window.as_weak());
+    listen_patients(
+        patient_service.clone(),
+        device_service.clone(),
+        patient_tracking.clone(),
+        window.as_weak(),
+    );
+
+    // Subscribed here too, for the identical reason `listen_patients`
+    // is subscribed above and before `listen_queue` — `listen_queue`'s
+    // very first reaction to a `with_doctor` patient also fires
+    // `device_service.request_patient_items(...)` (see below), and that
+    // response needs a subscriber already in place.
+    listen_device(
+        device_service.clone(),
+        patient_service.clone(),
+        patient_tracking.clone(),
+        window.as_weak(),
+    );
 
     // Called right after `listen_patients` (see the comment above) —
     // still early, but the exact ordering relative to the rest of
@@ -229,6 +253,7 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     listen_queue(
         queue_service.clone(),
         patient_service.clone(),
+        device_service.clone(),
         patient_tracking.clone(),
         window.as_weak(),
     );
@@ -301,7 +326,8 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     // transcribed) goes straight to the server.
     let answer_ai_service = ai_service.clone();
     window.on_clarification_answer_submitted(move |suggestion_id, answer| {
-        let _ = answer_ai_service.resolve_clarification(suggestion_id.to_string(), answer.to_string());
+        let _ =
+            answer_ai_service.resolve_clarification(suggestion_id.to_string(), answer.to_string());
     });
 
     let voice_controller = controller.clone();
@@ -332,11 +358,13 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     });
 
     let patients_select_service = patient_service.clone();
+    let patients_select_device_service = device_service.clone();
     let patients_select_tracking = patient_tracking.clone();
     let patients_select_weak = window.as_weak();
     window.on_patients_patient_selected(move |patient_id| {
         handle_patients_patient_selected(
             &patients_select_service,
+            &patients_select_device_service,
             &patients_select_tracking,
             &patients_select_weak,
             patient_id.to_string(),
@@ -354,6 +382,28 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
         &window.as_weak(),
         window.get_patients_search_query().to_string(),
     );
+
+    // Device-originated (DICOM) actions from either `PatientFileCard`
+    // instantiation (see `doctor-window.slint`'s shared
+    // `save-oct-image`/`device-suggestion-accepted`/
+    // `device-suggestion-rejected` window callbacks) — routed straight
+    // to `device_service`; the result comes back through
+    // `listen_device`, same request/response split every other
+    // service in this controller uses.
+    let save_image_service = device_service.clone();
+    window.on_save_oct_image(move |image_id| {
+        let _ = save_image_service.request_image_data(image_id.to_string());
+    });
+
+    let accept_device_service = device_service.clone();
+    window.on_device_suggestion_accepted(move |suggestion_id| {
+        let _ = accept_device_service.apply_suggestion(suggestion_id.to_string());
+    });
+
+    let reject_device_service = device_service.clone();
+    window.on_device_suggestion_rejected(move |suggestion_id| {
+        let _ = reject_device_service.reject_suggestion(suggestion_id.to_string());
+    });
 
     apply_settings_to_window(window, &initial_settings);
 
@@ -534,6 +584,7 @@ enum CurrentPatientFileChange {
 fn listen_queue(
     queue_service: Rc<QueueService>,
     patient_service: Arc<PatientService>,
+    device_service: Arc<DeviceService>,
     tracking: Arc<Mutex<PatientFileTrackingState>>,
     weak: slint::Weak<DoctorWindow>,
 ) {
@@ -626,6 +677,13 @@ fn listen_queue(
                                 window.set_current_patient_has_file(false);
                                 window.set_current_patient_file_error_text("".into());
                             });
+                            // Device data has no separate loading/error
+                            // UI of its own — it fills in once
+                            // `listen_device` hears back, or simply
+                            // stays empty if nothing's on file yet, so
+                            // there's nothing to reset here beyond the
+                            // chart-loading state above.
+                            let _ = device_service.request_patient_items(patient_id.clone());
                             if patient_service.request_file(patient_id).is_err() {
                                 let _ = weak.upgrade_in_event_loop(move |window| {
                                     window.set_current_patient_file_loading(false);
@@ -712,6 +770,7 @@ fn handle_patients_search_edited(
 /// patient on file, whether or not they're currently checked in.
 fn handle_patients_patient_selected(
     patient_service: &Arc<PatientService>,
+    device_service: &Arc<DeviceService>,
     tracking: &Arc<Mutex<PatientFileTrackingState>>,
     weak: &slint::Weak<DoctorWindow>,
     patient_id: String,
@@ -732,6 +791,11 @@ fn handle_patients_patient_selected(
     window.set_patients_has_file(false);
     window.set_patients_file_error_text("".into());
 
+    // Same "no dedicated loading UI" reasoning as the Dashboard's
+    // auto-fetch (see `listen_queue`) — device data just fills in
+    // whenever `listen_device` hears back.
+    let _ = device_service.request_patient_items(patient_id.clone());
+
     if patient_service.request_file(patient_id).is_err() {
         window.set_patients_file_loading(false);
         window.set_patients_file_error_text("Not connected to the server.".into());
@@ -748,6 +812,7 @@ fn handle_patients_patient_selected(
 /// closes over the `Send + Sync` pieces it actually needs.
 fn listen_patients(
     patient_service: Arc<PatientService>,
+    device_service: Arc<DeviceService>,
     tracking: Arc<Mutex<PatientFileTrackingState>>,
     weak: slint::Weak<DoctorWindow>,
 ) {
@@ -765,7 +830,9 @@ fn listen_patients(
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         window.set_patients_search_busy(false);
                         window.set_patients_search_error_text("".into());
-                        window.set_patients_search_results(patient_service::to_patient_rows(&results));
+                        window.set_patients_search_results(patient_service::to_patient_rows(
+                            &results,
+                        ));
                     });
                 }
                 Ok(PatientSearchUpdate::Failed { query, message }) => {
@@ -799,6 +866,7 @@ fn listen_patients(
                     if !is_selected && !is_current {
                         continue;
                     }
+
                     // `PatientFileData` wraps `ModelRc<HistoryEntryRow>`,
                     // which holds an `Rc` and so isn't `Send` — it can't
                     // be built out here and then captured into this
@@ -809,8 +877,11 @@ fn listen_patients(
                     // `String`/`Vec<_>` wire records, so those are fine
                     // to capture — the `ModelRc` is only ever
                     // constructed once we're already on the UI thread.
+
+                    let device_service = device_service.clone();
                     let _ = weak.upgrade_in_event_loop(move |window| {
-                        let data: PatientFileData = patient_service::to_patient_file_data(&patient, &history);
+                        let data: PatientFileData =
+                            patient_service::to_patient_file_data(&patient, &history);
                         if is_selected {
                             window.set_patients_file_loading(false);
                             window.set_patients_file_error_text("".into());
@@ -823,9 +894,14 @@ fn listen_patients(
                             window.set_current_patient_has_file(true);
                             window.set_current_patient_file(data);
                         }
+
+                        let _ = device_service.request_patient_items(patient.patient_id.clone());
                     });
                 }
-                Ok(PatientSearchUpdate::FileFailed { patient_id, message }) => {
+                Ok(PatientSearchUpdate::FileFailed {
+                    patient_id,
+                    message,
+                }) => {
                     let (is_selected, is_current) = {
                         let tracked = tracking.lock().unwrap();
                         (
@@ -849,7 +925,8 @@ fn listen_patients(
                         }
                     });
                 }
-                Ok(PatientSearchUpdate::Created { .. }) | Ok(PatientSearchUpdate::CreateFailed { .. }) => {
+                Ok(PatientSearchUpdate::Created { .. })
+                | Ok(PatientSearchUpdate::CreateFailed { .. }) => {
                     // The doctor client never sends
                     // `PatientCreateRequest` — only
                     // `controllers::receptionist` does — so these
@@ -860,7 +937,9 @@ fn listen_patients(
                 }
                 Ok(PatientSearchUpdate::Disconnected) => {
                     let _ = weak.upgrade_in_event_loop(move |window| {
-                        window.set_connection_status_text("Offline — could not reach the server".into());
+                        window.set_connection_status_text(
+                            "Offline — could not reach the server".into(),
+                        );
                         window.set_connection_status_tone(ThymeChipTone::Danger);
                     });
                     break;
@@ -995,10 +1074,11 @@ fn listen_ai(
                     // same refresh a `SuggestionApplied` gets.
                     let just_applied = status == "applied";
                     {
-                        state
-                            .lock()
-                            .unwrap()
-                            .resolve_clarification(&suggestion_id, description, status);
+                        state.lock().unwrap().resolve_clarification(
+                            &suggestion_id,
+                            description,
+                            status,
+                        );
                     }
                     if just_applied {
                         refresh_patient_file();
@@ -1058,6 +1138,248 @@ fn listen_ai(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
             refresh_patient_file()
+        }
+    });
+}
+
+/// Forwards `device_service`'s update stream to both `PatientFileCard`
+/// panels for as long as the connection stays alive — the `listen_ai`
+/// of the device-ingestion pipeline (`server::dicom`). A free function
+/// for the same `Send`-boundary reason `listen_queue`/`listen_ai`/
+/// `listen_patients` are.
+///
+/// Unlike `AiPanelState`, there's no local copy of the suggestion list
+/// to keep in sync here: `DeviceItemsReady` always carries the full,
+/// current set for one patient (mirrors how `PatientFileReady` always
+/// carries a full chart, not a delta), so applying/rejecting a
+/// suggestion just means removing that one row from whichever of the
+/// two window-held `PatientFileData`s has it, then re-requesting both
+/// that patient's chart (only if the reading was actually applied) and
+/// their device items (either way, so a superseded/resolved reading
+/// doesn't linger) — see `resolve_device_suggestion` below.
+fn listen_device(
+    device_service: Arc<DeviceService>,
+    patient_service: Arc<PatientService>,
+    tracking: Arc<Mutex<PatientFileTrackingState>>,
+    weak: slint::Weak<DoctorWindow>,
+) {
+    let mut updates = device_service.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match updates.recv().await {
+                Ok(DeviceUpdate::ItemsReady {
+                    patient_id,
+                    oct_images,
+                    pending_suggestions,
+                }) => {
+                    let (is_selected, is_current) = {
+                        let tracked = tracking.lock().unwrap();
+                        println!(
+                            "Device update for patient {patient_id}: last_selected_id={}, current_patient_id={}",
+                            tracked.last_selected_id, tracked.current_patient_id
+                        );
+                        (
+                            tracked.last_selected_id == patient_id,
+                            tracked.current_patient_id == patient_id,
+                        )
+                    };
+                    if !is_selected && !is_current {
+                        println!(
+                            "Ignoring device update for patient {patient_id} because it's not selected or current"
+                        );
+                        // A newer selection/room change has since
+                        // superseded this patient — same staleness
+                        // check `listen_patients` makes for
+                        // `PatientSearchUpdate::FileReady`.
+                        continue;
+                    }
+
+                    println!(
+                        "Updating device items for patient {patient_id}: {} OCT images, {} pending suggestions",
+                        oct_images.len(),
+                        pending_suggestions.len()
+                    );
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        let oct_rows = device_service::to_oct_image_rows(&oct_images);
+                        let suggestion_rows =
+                            device_service::to_device_suggestion_rows(&pending_suggestions);
+                        if is_selected {
+                            let mut file = window.get_patients_file();
+                            file.oct_images = oct_rows.clone();
+                            file.pending_device_suggestions = suggestion_rows.clone();
+                            window.set_patients_file(file);
+                        }
+                        if is_current {
+                            let mut file = window.get_current_patient_file();
+                            file.oct_images = oct_rows;
+                            file.pending_device_suggestions = suggestion_rows;
+                            window.set_current_patient_file(file);
+                        }
+                    });
+                }
+                Ok(DeviceUpdate::ItemsFailed {
+                    patient_id,
+                    message,
+                }) => {
+                    let (is_selected, is_current) = {
+                        let tracked = tracking.lock().unwrap();
+                        (
+                            tracked.last_selected_id == patient_id,
+                            tracked.current_patient_id == patient_id,
+                        )
+                    };
+                    if !is_selected && !is_current {
+                        continue;
+                    }
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window.set_device_status_text(message.into());
+                    });
+                }
+                Ok(DeviceUpdate::SuggestionApplied {
+                    suggestion_id,
+                    summary: _,
+                }) => {
+                    resolve_device_suggestion(
+                        &weak,
+                        &tracking,
+                        &patient_service,
+                        &device_service,
+                        suggestion_id,
+                        true,
+                    );
+                }
+                Ok(DeviceUpdate::SuggestionApplyFailed {
+                    suggestion_id: _,
+                    message,
+                }) => {
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window.set_device_status_text(message.into());
+                    });
+                }
+                Ok(DeviceUpdate::SuggestionRejected { suggestion_id }) => {
+                    resolve_device_suggestion(
+                        &weak,
+                        &tracking,
+                        &patient_service,
+                        &device_service,
+                        suggestion_id,
+                        false,
+                    );
+                }
+                Ok(DeviceUpdate::SuggestionRejectFailed {
+                    suggestion_id: _,
+                    message,
+                }) => {
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window.set_device_status_text(message.into());
+                    });
+                }
+                Ok(DeviceUpdate::ImageDataReady {
+                    image_id,
+                    pixel_data,
+                    ..
+                }) => {
+                    // A plain synchronous `fs::write` (see
+                    // `device_service::save_oct_image`) rather than
+                    // `spawn_blocking` — a single OCT slice's worth of
+                    // bytes is small enough that this doesn't
+                    // meaningfully stall the task, the same judgment
+                    // call `services::settings_service::Settings::save`
+                    // already makes for this app's other local writes.
+                    let status = match device_service::save_oct_image(&image_id, &pixel_data) {
+                        Ok(path) => format!("Saved image to {}", path.display()),
+                        Err(e) => format!("Could not save image: {e}"),
+                    };
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window.set_oct_status_text(status.into());
+                    });
+                }
+                Ok(DeviceUpdate::ImageDataFailed {
+                    image_id: _,
+                    message,
+                }) => {
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window
+                            .set_oct_status_text(format!("Could not load image: {message}").into());
+                    });
+                }
+                Ok(DeviceUpdate::Disconnected) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Removes `suggestion_id` from a `SuggestionRow` list, reporting
+/// whether it was actually present — shared by both branches
+/// `resolve_device_suggestion` below handles.
+fn remove_suggestion_row(
+    list: &ModelRc<SuggestionRow>,
+    suggestion_id: &str,
+) -> (ModelRc<SuggestionRow>, bool) {
+    let mut found = false;
+    let rows: Vec<SuggestionRow> = list
+        .iter()
+        .filter(|r| {
+            let matches = r.suggestion_id.as_str() == suggestion_id;
+            found = found || matches;
+            !matches
+        })
+        .collect();
+    (ModelRc::new(VecModel::from(rows)), found)
+}
+
+/// Shared handling for `DeviceUpdate::SuggestionApplied`/`SuggestionRejected`
+/// — see `listen_device`'s doc comment for the overall approach.
+/// `refresh_chart` is `true` only for an applied suggestion (a
+/// rejection never touches the patient's chart, so there's nothing new
+/// for `patient_service` to fetch); either way, `device_service` is
+/// re-queried so the now-resolved reading stops showing as pending.
+fn resolve_device_suggestion(
+    weak: &slint::Weak<DoctorWindow>,
+    tracking: &Arc<Mutex<PatientFileTrackingState>>,
+    patient_service: &Arc<PatientService>,
+    device_service: &Arc<DeviceService>,
+    suggestion_id: String,
+    refresh_chart: bool,
+) {
+    let tracking = tracking.clone();
+    let patient_service = patient_service.clone();
+    let device_service = device_service.clone();
+    let _ = weak.upgrade_in_event_loop(move |window| {
+        window.set_device_status_text("".into());
+
+        let mut current = window.get_current_patient_file();
+        let (new_current, removed_from_current) =
+            remove_suggestion_row(&current.pending_device_suggestions, &suggestion_id);
+        current.pending_device_suggestions = new_current;
+        window.set_current_patient_file(current);
+
+        let mut selected = window.get_patients_file();
+        let (new_selected, removed_from_selected) =
+            remove_suggestion_row(&selected.pending_device_suggestions, &suggestion_id);
+        selected.pending_device_suggestions = new_selected;
+        window.set_patients_file(selected);
+
+        if removed_from_current {
+            let id = tracking.lock().unwrap().current_patient_id.clone();
+            if !id.is_empty() {
+                if refresh_chart {
+                    let _ = patient_service.request_file(id.clone());
+                }
+                let _ = device_service.request_patient_items(id);
+            }
+        }
+        if removed_from_selected {
+            let id = tracking.lock().unwrap().last_selected_id.clone();
+            if !id.is_empty() {
+                if refresh_chart {
+                    let _ = patient_service.request_file(id.clone());
+                }
+                let _ = device_service.request_patient_items(id);
+            }
         }
     });
 }
@@ -1188,7 +1510,10 @@ impl DoctorController {
             return;
         }
 
-        if matches!(*self.recording_target.borrow(), RecordingTarget::Clarification(_)) {
+        if matches!(
+            *self.recording_target.borrow(),
+            RecordingTarget::Clarification(_)
+        ) {
             // A clarification voice-answer recording is what's actually
             // running right now (see `RecordingTarget`) — that's
             // stopped via `stop_clarification_recording`, not this one.
@@ -1336,7 +1661,8 @@ impl DoctorController {
         let Some(window) = weak.upgrade() else { return };
 
         let already_recording_this = window.get_recording_active()
-            && *self.recording_target.borrow() == RecordingTarget::Clarification(suggestion_id.clone());
+            && *self.recording_target.borrow()
+                == RecordingTarget::Clarification(suggestion_id.clone());
 
         if already_recording_this {
             self.stop_clarification_recording(weak);
@@ -1390,7 +1716,9 @@ impl DoctorController {
     /// counterpart of `stop_recording_now`.
     fn stop_clarification_recording(self: Rc<Self>, weak: slint::Weak<DoctorWindow>) {
         let Some(window) = weak.upgrade() else { return };
-        let Some(recorder) = &self.recorder else { return };
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
 
         let RecordingTarget::Clarification(suggestion_id) =
             self.recording_target.replace(RecordingTarget::Transcript)
@@ -1429,8 +1757,9 @@ impl DoctorController {
                 Err(e) => {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(window) = stt_weak.upgrade() {
-                            window
-                                .set_ai_error_text(format!("Could not transcribe answer: {e}").into());
+                            window.set_ai_error_text(
+                                format!("Could not transcribe answer: {e}").into(),
+                            );
                         }
                     });
                 }

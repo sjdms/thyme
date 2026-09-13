@@ -16,7 +16,14 @@ use packets::{
         ProcessTranscriptionPacket, RejectSuggestedActionError, RejectSuggestedActionRequest,
         RejectSuggestedActionResponse, ResolveClarificationError, ResolveClarificationRequest,
         ResolveClarificationResponse, SuggestedActionRecord,
-    }, auth::{AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket}, hello::{Hello, HelloOperationMode}, keepalive::{PONG_PACKET, Ping}, patient::{
+    }, auth::{AuthChallenge, AuthResponse, AuthStatus, RequestSTTAPIKeyPacket, STTAPIKeyResponsePacket},
+    device::{
+        ApplyDeviceSuggestionError, ApplyDeviceSuggestionRequest, ApplyDeviceSuggestionResponse,
+        DevicePatientItemsError, DevicePatientItemsRequest, DevicePatientItemsResponse,
+        DeviceSuggestedActionRecord, OctImageDataError, OctImageDataRequest, OctImageDataResponse,
+        OctImageRecord, RejectDeviceSuggestionError, RejectDeviceSuggestionRequest,
+        RejectDeviceSuggestionResponse,
+    }, hello::{Hello, HelloOperationMode}, keepalive::{PONG_PACKET, Ping}, patient::{
         PatientCreateError, PatientCreateRequest, PatientCreateResponse, PatientFileError,
         PatientFileRequest, PatientFileResponse, PatientHistoryRecord, PatientRecord,
         PatientSearchError, PatientSearchRequest, PatientSearchResponse,
@@ -105,6 +112,47 @@ pub enum ServerEvent {
     /// couldn't even be loaded (distinct from one suggestion within it
     /// failing, which shows up inside `AllSuggestionsApplied`'s results).
     AllSuggestionsApplyFailed { transcription_id: String, message: String },
+
+    /// Pushed after `Connection::request_device_items` succeeds — one
+    /// patient's device-originated data: every OCT image on file plus
+    /// any refraction reading still awaiting review (see
+    /// `packets::device::DevicePatientItemsResponse`). `patient_id` is
+    /// echoed back so a caller that has since opened a different
+    /// patient can discard a stale response, the same as
+    /// `PatientFileReady`.
+    DeviceItemsReady {
+        patient_id: String,
+        oct_images: Vec<OctImageRecord>,
+        pending_suggestions: Vec<DeviceSuggestedActionRecord>,
+    },
+    /// Pushed instead of `DeviceItemsReady` when this patient's device
+    /// data couldn't be loaded. `patient_id` is echoed back for the
+    /// same reason.
+    DeviceItemsFailed { patient_id: String, message: String },
+    /// Pushed after `Connection::apply_device_suggestion` succeeds —
+    /// the reading is now on the patient's chart.
+    DeviceSuggestionApplied { suggestion_id: String, summary: String },
+    /// Pushed instead of `DeviceSuggestionApplied` when applying failed.
+    DeviceSuggestionApplyFailed { suggestion_id: String, message: String },
+    /// Pushed after `Connection::reject_device_suggestion` succeeds.
+    DeviceSuggestionRejected { suggestion_id: String },
+    /// Pushed instead of `DeviceSuggestionRejected` when dismissing
+    /// failed.
+    DeviceSuggestionRejectFailed { suggestion_id: String, message: String },
+    /// Pushed after `Connection::request_oct_image_data` succeeds —
+    /// one OCT image's actual pixel bytes, ready to be written to disk
+    /// (see `services::device_service::save_oct_image`).
+    OctImageDataReady {
+        image_id: String,
+        eye: String,
+        rows: i32,
+        columns: i32,
+        number_of_frames: i32,
+        pixel_data: Vec<u8>,
+    },
+    /// Pushed instead of `OctImageDataReady` when the image's bytes
+    /// couldn't be loaded.
+    OctImageDataFailed { image_id: String, message: String },
 }
 
 /// UI-facing input for `Connection::create_patient` — the wire packet
@@ -231,6 +279,10 @@ enum OutboundRequest {
     RejectSuggestion { suggestion_id: String },
     ResolveClarification { suggestion_id: String, answer: String },
     ApplyAllSuggestions { transcription_id: String },
+    RequestDeviceItems { patient_id: String },
+    ApplyDeviceSuggestion { suggestion_id: String },
+    RejectDeviceSuggestion { suggestion_id: String },
+    RequestOctImageData { image_id: String },
 }
 
 type EncryptedFramedStream = FramedStream<EncryptedStream<TcpStream>>;
@@ -308,6 +360,18 @@ impl Connection {
                             }
                             OutboundRequest::ApplyAllSuggestions { transcription_id } => {
                                 stream.write_packet(&ApplyAllSuggestedActionsRequest { transcription_id }).await
+                            }
+                            OutboundRequest::RequestDeviceItems { patient_id } => {
+                                stream.write_packet(&DevicePatientItemsRequest { patient_id }).await
+                            }
+                            OutboundRequest::ApplyDeviceSuggestion { suggestion_id } => {
+                                stream.write_packet(&ApplyDeviceSuggestionRequest { suggestion_id }).await
+                            }
+                            OutboundRequest::RejectDeviceSuggestion { suggestion_id } => {
+                                stream.write_packet(&RejectDeviceSuggestionRequest { suggestion_id }).await
+                            }
+                            OutboundRequest::RequestOctImageData { image_id } => {
+                                stream.write_packet(&OctImageDataRequest { image_id }).await
                             }
                         };
 
@@ -469,6 +533,64 @@ impl Connection {
                     message: response.message,
                 });
             }
+            DevicePatientItemsResponse::ID => {
+                let response = DevicePatientItemsResponse::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::DeviceItemsReady {
+                    patient_id: response.patient_id,
+                    oct_images: response.oct_images,
+                    pending_suggestions: response.pending_suggestions,
+                });
+            }
+            DevicePatientItemsError::ID => {
+                let response = DevicePatientItemsError::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::DeviceItemsFailed {
+                    patient_id: response.patient_id,
+                    message: response.message,
+                });
+            }
+            ApplyDeviceSuggestionResponse::ID => {
+                let response = ApplyDeviceSuggestionResponse::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::DeviceSuggestionApplied {
+                    suggestion_id: response.suggestion_id,
+                    summary: response.summary,
+                });
+            }
+            ApplyDeviceSuggestionError::ID => {
+                let response = ApplyDeviceSuggestionError::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::DeviceSuggestionApplyFailed {
+                    suggestion_id: response.suggestion_id,
+                    message: response.message,
+                });
+            }
+            RejectDeviceSuggestionResponse::ID => {
+                let response = RejectDeviceSuggestionResponse::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::DeviceSuggestionRejected { suggestion_id: response.suggestion_id });
+            }
+            RejectDeviceSuggestionError::ID => {
+                let response = RejectDeviceSuggestionError::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::DeviceSuggestionRejectFailed {
+                    suggestion_id: response.suggestion_id,
+                    message: response.message,
+                });
+            }
+            OctImageDataResponse::ID => {
+                let response = OctImageDataResponse::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::OctImageDataReady {
+                    image_id: response.image_id,
+                    eye: response.eye,
+                    rows: response.rows,
+                    columns: response.columns,
+                    number_of_frames: response.number_of_frames,
+                    pixel_data: response.pixel_data,
+                });
+            }
+            OctImageDataError::ID => {
+                let response = OctImageDataError::decode(&mut PacketReader::new(payload))?;
+                let _ = events.send(ServerEvent::OctImageDataFailed {
+                    image_id: response.image_id,
+                    message: response.message,
+                });
+            }
             _ => {
                 // Unrecognized packets are ignored rather than treated as
                 // fatal, so future server features can roll out without
@@ -617,6 +739,44 @@ impl Connection {
     pub fn apply_all_suggestions(&self, transcription_id: impl Into<String>) -> Result<()> {
         self.outbound
             .send(OutboundRequest::ApplyAllSuggestions { transcription_id: transcription_id.into() })
+            .map_err(|_| ClientError::Disconnected)
+    }
+
+    /// Loads one patient's device-originated data — every OCT image on
+    /// file plus any refraction reading still awaiting review. Result
+    /// arrives as `ServerEvent::DeviceItemsReady`/`DeviceItemsFailed`,
+    /// tagged with `patient_id` the same way `request_patient_file`'s
+    /// response is.
+    pub fn request_device_items(&self, patient_id: impl Into<String>) -> Result<()> {
+        self.outbound
+            .send(OutboundRequest::RequestDeviceItems { patient_id: patient_id.into() })
+            .map_err(|_| ClientError::Disconnected)
+    }
+
+    /// Accepts one staged device-reported refraction reading, writing
+    /// it to the patient's chart exactly as the device reported it.
+    /// Result arrives as
+    /// `ServerEvent::DeviceSuggestionApplied`/`DeviceSuggestionApplyFailed`.
+    pub fn apply_device_suggestion(&self, suggestion_id: impl Into<String>) -> Result<()> {
+        self.outbound
+            .send(OutboundRequest::ApplyDeviceSuggestion { suggestion_id: suggestion_id.into() })
+            .map_err(|_| ClientError::Disconnected)
+    }
+
+    /// Dismisses one staged device-reported refraction reading without
+    /// ever touching the patient's chart. Result arrives as
+    /// `ServerEvent::DeviceSuggestionRejected`/`DeviceSuggestionRejectFailed`.
+    pub fn reject_device_suggestion(&self, suggestion_id: impl Into<String>) -> Result<()> {
+        self.outbound
+            .send(OutboundRequest::RejectDeviceSuggestion { suggestion_id: suggestion_id.into() })
+            .map_err(|_| ClientError::Disconnected)
+    }
+
+    /// Fetches one OCT image's actual pixel bytes. Result arrives as
+    /// `ServerEvent::OctImageDataReady`/`OctImageDataFailed`.
+    pub fn request_oct_image_data(&self, image_id: impl Into<String>) -> Result<()> {
+        self.outbound
+            .send(OutboundRequest::RequestOctImageData { image_id: image_id.into() })
             .map_err(|_| ClientError::Disconnected)
     }
 }

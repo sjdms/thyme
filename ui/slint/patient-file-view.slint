@@ -1,12 +1,26 @@
 import { ThymePalette, ThymeSpace, ThymeType, ThymeRadius } from "design/tokens.slint";
 import { ThymeTextField } from "design/text-field.slint";
 import { ThymeStatusChip, ThymeChipTone } from "design/status-chip.slint";
+import { ThymeButton, ThymeButtonKind } from "design/button.slint";
 import { PatientResultRow, PatientRow } from "patient-result-row.slint";
+import { SuggestionRow, ThymeSuggestionCard } from "suggestion-row.slint";
 export { PatientRow } from "patient-result-row.slint";
 
 export struct HistoryEntryRow {
     line: string,
     meta: string,
+}
+
+// OctImageRow — a UI-only projection of one OCT scan on file
+// (transport type: `packets::device::OctImageRecord`). Pre-formatted in
+// Rust (`services::device_service::to_oct_image_rows`), same
+// "format in Rust, render in Slint" split `HistoryEntryRow` uses.
+// There's no inline preview here — see `OctImageCard`'s doc comment.
+export struct OctImageRow {
+    image-id: string,
+    eye: string,
+    dimensions: string,
+    acquired: string,
 }
 
 export struct PatientFileData {
@@ -22,6 +36,16 @@ export struct PatientFileData {
     lab-orders: [HistoryEntryRow],
     referrals: [HistoryEntryRow],
     refractions: [HistoryEntryRow],
+    // Device-originated data (`server::dicom`) — populated separately
+    // from everything above, via `DevicePatientItemsRequest`/`Response`
+    // rather than `PatientFileRequest`/`Response`, since it comes from
+    // its own staging tables (`device_studies`/`oct_images`/
+    // `device_suggested_actions`) rather than the chart-history tables
+    // the fields above are drawn from. See `controllers::doctor::listen_device`.
+    oct-images: [OctImageRow],
+    // Always `status == "pending"` — see
+    // `services::device_service::to_device_suggestion_rows`.
+    pending-device-suggestions: [SuggestionRow],
 }
 
 component HistoryEntryCard inherits Rectangle {
@@ -81,12 +105,102 @@ component HistorySection inherits Rectangle {
     }
 }
 
+// OctImageCard — one OCT scan on file. No inline preview: this client
+// has no raw-pixel-to-image decoding pipeline yet (see
+// `packets::device::OctImageDataResponse`'s doc comment on why the
+// bytes are native/uncompressed, not a displayable format already),
+// so "Save" fetches the image's bytes and writes them to disk
+// (`services::device_service::save_oct_image`) for a clinician to open
+// in an external DICOM/image viewer, rather than rendering it here.
+component OctImageCard inherits Rectangle {
+    in property <OctImageRow> image: { image-id: "", eye: "", dimensions: "", acquired: "" };
+    callback save-clicked();
+
+    background: ThymePalette.surface-muted;
+    border-radius: ThymeRadius.sm;
+
+    HorizontalLayout {
+        padding: ThymeSpace.sm;
+        spacing: ThymeSpace.sm;
+        alignment: space-between;
+
+        VerticalLayout {
+            spacing: 2px;
+
+            Text {
+                text: root.image.eye;
+                font-size: ThymeType.size-sm;
+                color: ThymePalette.text-primary;
+            }
+
+            Text {
+                text: root.image.dimensions + " • " + root.image.acquired;
+                font-size: ThymeType.size-xs;
+                color: ThymePalette.text-secondary;
+            }
+        }
+
+        ThymeButton {
+            text: "Save";
+            kind: ThymeButtonKind.secondary;
+            height: 30px;
+            clicked => { root.save-clicked(); }
+        }
+    }
+}
+
+component OctImageSection inherits Rectangle {
+    in property <[OctImageRow]> images: [];
+    callback save-requested(string);
+
+    background: transparent;
+
+    VerticalLayout {
+        spacing: ThymeSpace.sm;
+
+        Text {
+            text: "Imaging (OCT) (" + root.images.length + ")";
+            font-size: ThymeType.size-sm;
+            font-weight: 700;
+            color: ThymePalette.text-primary;
+        }
+
+        if root.images.length == 0: Text {
+            text: "None on file.";
+            font-size: ThymeType.size-xs;
+            color: ThymePalette.text-secondary;
+        }
+
+        if root.images.length > 0: VerticalLayout {
+            spacing: ThymeSpace.xs;
+
+            for image in root.images: OctImageCard {
+                image: image;
+                save-clicked => { root.save-requested(image.image-id); }
+            }
+        }
+    }
+}
+
 export component PatientFileCard inherits VerticalLayout {
     in property <PatientFileData> file: {
         patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
         clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [], refractions: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [], oct-images: [], pending-device-suggestions: [],
     };
+    // Status of the most recently requested "Save" (empty when nothing's
+    // in flight or nothing's been saved yet this session) — see
+    // `controllers::doctor::listen_device`.
+    in property <string> oct-status-text: "";
+    // Feedback for the device-suggestions section specifically —
+    // failed apply/reject, or a device-items fetch that failed
+    // outright — kept separate from `oct-status-text` so an image-save
+    // outcome and a suggestion-review outcome never overwrite each
+    // other.
+    in property <string> device-status-text: "";
+    callback save-oct-image(string);
+    callback accept-device-suggestion(string);
+    callback reject-device-suggestion(string);
 
     spacing: ThymeSpace.lg;
 
@@ -111,6 +225,42 @@ export component PatientFileCard inherits VerticalLayout {
             font-size: ThymeType.size-sm;
             color: ThymePalette.text-secondary;
         }
+    }
+
+    if root.file.pending-device-suggestions.length > 0 || root.device-status-text != "": VerticalLayout {
+        spacing: ThymeSpace.sm;
+
+        if root.file.pending-device-suggestions.length > 0: Text {
+            text: "Device readings awaiting review (" + root.file.pending-device-suggestions.length + ")";
+            font-size: ThymeType.size-sm;
+            font-weight: 700;
+            color: ThymePalette.accent;
+        }
+
+        for suggestion in root.file.pending-device-suggestions: ThymeSuggestionCard {
+            suggestion: suggestion;
+            accept-clicked => { root.accept-device-suggestion(suggestion.suggestion-id); }
+            reject-clicked => { root.reject-device-suggestion(suggestion.suggestion-id); }
+        }
+
+        if root.device-status-text != "": Text {
+            text: root.device-status-text;
+            font-size: ThymeType.size-xs;
+            color: ThymePalette.text-secondary;
+            wrap: word-wrap;
+        }
+    }
+
+    OctImageSection {
+        images: root.file.oct-images;
+        save-requested(image-id) => { root.save-oct-image(image-id); }
+    }
+
+    if root.oct-status-text != "": Text {
+        text: root.oct-status-text;
+        font-size: ThymeType.size-xs;
+        color: ThymePalette.text-secondary;
+        wrap: word-wrap;
     }
 
     HistorySection {
@@ -167,11 +317,16 @@ export component PatientFileView inherits Rectangle {
     in property <PatientFileData> file: {
         patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
         clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [], refractions: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [], oct-images: [], pending-device-suggestions: [],
     };
+    in property <string> oct-status-text: "";
+    in property <string> device-status-text: "";
 
     callback search-edited(string);
     callback patient-selected(string);
+    callback save-oct-image(string);
+    callback accept-device-suggestion(string);
+    callback reject-device-suggestion(string);
 
     background: ThymePalette.background;
 
@@ -293,6 +448,11 @@ export component PatientFileView inherits Rectangle {
 
                     PatientFileCard {
                         file: root.file;
+                        oct-status-text: root.oct-status-text;
+                        device-status-text: root.device-status-text;
+                        save-oct-image(image-id) => { root.save-oct-image(image-id); }
+                        accept-device-suggestion(suggestion-id) => { root.accept-device-suggestion(suggestion-id); }
+                        reject-device-suggestion(suggestion-id) => { root.reject-device-suggestion(suggestion-id); }
                     }
                 }
             }

@@ -151,6 +151,7 @@ pub fn format_detail_line(record: &PatientRecord) -> String {
 /// date/locale/provenance-labeling logic, the same "format in Rust,
 /// render in Slint" split `to_patient_rows` above already uses.
 pub fn to_patient_file_data(patient: &PatientRecord, history: &PatientHistoryRecord) -> PatientFileData {
+    println!("Building PatientFileData for patient {} with {} clinical notes, {} diagnoses, {} follow-ups, {} allergies, {} medications, {} lab orders, {} referrals, and {} refractions", patient.patient_id, history.clinical_notes.len(), history.diagnoses.len(), history.follow_ups.len(), history.allergies.len(), history.medications.len(), history.lab_orders.len(), history.referrals.len(), history.refractions.len());
     PatientFileData {
         patient_id: patient.patient_id.clone().into(),
         legal_name: patient.legal_name.clone().into(),
@@ -164,6 +165,16 @@ pub fn to_patient_file_data(patient: &PatientRecord, history: &PatientHistoryRec
         lab_orders: to_rows(&history.lab_orders, lab_order_row),
         referrals: to_rows(&history.referrals, referral_row),
         refractions: to_rows(&history.refractions, refraction_row),
+        // Device-originated data (`server::dicom`) has no place in
+        // `PatientHistoryRecord`/`PatientFileRequest` — it comes back
+        // separately via `DevicePatientItemsRequest`/`Response` and is
+        // merged in afterward by `controllers::doctor::listen_device`.
+        // Starting empty here means a chart that arrives before that
+        // response does (the common case) still renders immediately,
+        // with the device sections filling in a moment later rather
+        // than blocking on them.
+        oct_images: ModelRc::new(VecModel::from(Vec::new())),
+        pending_device_suggestions: ModelRc::new(VecModel::from(Vec::new())),
     }
 }
 
