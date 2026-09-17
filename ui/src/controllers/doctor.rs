@@ -79,6 +79,23 @@ impl AiPanelState {
         }
     }
 
+    /// `true` if `suggestion_id` names a `ThymeAction::EndVisit`
+    /// suggestion — checked wherever a suggestion transitions to
+    /// `"applied"` (`SuggestionApplied`/`AllApplied`/an auto-applying
+    /// `ClarificationResolved`), so the client can show the dedicated
+    /// "Visit ended" summary dialog in addition to (not instead of) the
+    /// normal suggestion-list update every applied action gets. None of
+    /// those response packets carry `action_type` themselves — only
+    /// `SuggestedActionRecord` does, from the original
+    /// `SuggestionsReady` — so this looks it up in the locally-held
+    /// copy rather than needing the server to repeat it on every
+    /// response.
+    fn is_end_visit(&self, suggestion_id: &str) -> bool {
+        self.suggestions
+            .iter()
+            .any(|r| r.suggestion_id == suggestion_id && r.action_type == "EndVisit")
+    }
+
     /// Folds a `ResolveClarificationResponse` into this panel's local
     /// copy of the suggestion it answered: the freshly recomputed
     /// `description` and `status` replace the old ones, and the
@@ -531,6 +548,14 @@ pub fn install(window: &DoctorWindow, connection: Connection) {
     window.on_sign_out_cancelled(move || {
         if let Some(window) = sign_out_cancel_weak.upgrade() {
             window.set_show_sign_out_confirm(false);
+        }
+    });
+
+    let end_visit_summary_weak = window.as_weak();
+    window.on_end_visit_summary_dismissed(move || {
+        if let Some(window) = end_visit_summary_weak.upgrade() {
+            window.set_show_end_visit_summary(false);
+            window.set_end_visit_summary_text("".into());
         }
     });
 }
@@ -993,6 +1018,19 @@ fn listen_ai(
                     patient_id,
                     suggestions,
                 }) => {
+                    // Under `ThymeAction::auto_apply`'s current `FIXME`
+                    // override, `EndVisit` — like every other action —
+                    // typically arrives here already `"applied"` rather
+                    // than waiting for an explicit accept; caught here
+                    // so the "Visit ended" summary dialog shows up the
+                    // moment that happens, not only via the
+                    // explicit-accept path below (which still handles
+                    // it too, in case that override is ever reverted).
+                    let end_visit_summary = suggestions
+                        .iter()
+                        .find(|r| r.action_type == "EndVisit" && r.status == "applied")
+                        .map(|r| r.description.clone());
+
                     {
                         let mut state = state.lock().unwrap();
                         state.transcription_id = Some(transcription_id.clone());
@@ -1007,6 +1045,10 @@ fn listen_ai(
                         window.set_ai_transcription_id(transcription_id.into());
                         window
                             .set_ai_suggestions(ai_service::to_suggestion_rows(&state.suggestions));
+                        if let Some(summary) = end_visit_summary {
+                            window.set_end_visit_summary_text(summary.into());
+                            window.set_show_end_visit_summary(true);
+                        }
                     });
                 }
                 Ok(AiUpdate::ProcessingFailed(message)) => {
@@ -1017,17 +1059,24 @@ fn listen_ai(
                 }
                 Ok(AiUpdate::SuggestionApplied {
                     suggestion_id,
-                    summary: _,
+                    summary,
                 }) => {
                     let state = state.clone();
-                    {
-                        state.lock().unwrap().mark_status(&suggestion_id, "applied");
-                    }
+                    let is_end_visit = {
+                        let mut state = state.lock().unwrap();
+                        let is_end_visit = state.is_end_visit(&suggestion_id);
+                        state.mark_status(&suggestion_id, "applied");
+                        is_end_visit
+                    };
                     refresh_patient_file();
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         let state = state.lock().unwrap();
                         window
                             .set_ai_suggestions(ai_service::to_suggestion_rows(&state.suggestions));
+                        if is_end_visit {
+                            window.set_end_visit_summary_text(summary.into());
+                            window.set_show_end_visit_summary(true);
+                        }
                     });
                 }
                 Ok(AiUpdate::SuggestionApplyFailed {
@@ -1073,6 +1122,8 @@ fn listen_ai(
                     // the patient's chart server-side, so it needs the
                     // same refresh a `SuggestionApplied` gets.
                     let just_applied = status == "applied";
+                    let is_end_visit = just_applied && state.lock().unwrap().is_end_visit(&suggestion_id);
+                    let description_for_dialog = description.clone();
                     {
                         state.lock().unwrap().resolve_clarification(
                             &suggestion_id,
@@ -1087,6 +1138,10 @@ fn listen_ai(
                         let state = state.lock().unwrap();
                         window
                             .set_ai_suggestions(ai_service::to_suggestion_rows(&state.suggestions));
+                        if is_end_visit {
+                            window.set_end_visit_summary_text(description_for_dialog.into());
+                            window.set_show_end_visit_summary(true);
+                        }
                     });
                 }
                 Ok(AiUpdate::ClarificationResolveFailed {
@@ -1104,14 +1159,19 @@ fn listen_ai(
                     let state = state.clone();
                     let any_failed = results.iter().any(|r| !r.success);
                     let any_applied = results.iter().any(|r| r.success);
-                    {
+                    let end_visit_summary = {
                         let mut state = state.lock().unwrap();
+                        let end_visit_summary = results
+                            .iter()
+                            .find(|r| r.success && state.is_end_visit(&r.suggestion_id))
+                            .map(|r| r.message.clone());
                         for result in &results {
                             if result.success {
                                 state.mark_status(&result.suggestion_id, "applied");
                             }
                         }
-                    }
+                        end_visit_summary
+                    };
                     if any_applied {
                         refresh_patient_file();
                     }
@@ -1122,6 +1182,10 @@ fn listen_ai(
                             window.set_ai_error_text(
                                 "Some suggestions couldn't be applied. Please try them individually.".into(),
                             );
+                        }
+                        if let Some(summary) = end_visit_summary {
+                            window.set_end_visit_summary_text(summary.into());
+                            window.set_show_end_visit_summary(true);
                         }
                     });
                 }

@@ -42,7 +42,7 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
         notes about a patient encounter, and speech-to-text has produced a transcript \
         of what they said. Your job is to read that transcript, in light of the \
         patient's existing chart, and propose which structured chart actions (if any) \
-        are warranted.\n\n",
+        are warranted.\n\n If the transcript is in French, respond in French. If the transcript is in English, respond in English.\n\n",
     );
 
     prompt.push_str(
@@ -204,6 +204,72 @@ pub fn build_prompt(patient: &Patient, history: &PatientHistory, transcript: &st
                 line
             }),
         );
+        push_section(
+            &mut prompt,
+            "Prior visit summaries",
+            history.visit_summaries.iter().map(|v| v.summary.clone()),
+        );
+        push_section(
+            &mut prompt,
+            "Glasses prescriptions on file",
+            history.glasses_prescriptions.iter().map(|p| {
+                let mut line = format!("id:{}", p.id);
+                if let Some(sphere) = &p.od_sphere {
+                    line.push_str(&format!(" — OD: sphere {sphere}"));
+                    if let Some(cylinder) = &p.od_cylinder {
+                        line.push_str(&format!(", cylinder {cylinder}"));
+                    }
+                    if let Some(axis) = &p.od_axis {
+                        line.push_str(&format!(" x {axis}"));
+                    }
+                    if let Some(add) = &p.od_add {
+                        line.push_str(&format!(", add {add}"));
+                    }
+                }
+                if let Some(sphere) = &p.os_sphere {
+                    line.push_str(&format!(", OS: sphere {sphere}"));
+                    if let Some(cylinder) = &p.os_cylinder {
+                        line.push_str(&format!(", cylinder {cylinder}"));
+                    }
+                    if let Some(axis) = &p.os_axis {
+                        line.push_str(&format!(" x {axis}"));
+                    }
+                    if let Some(add) = &p.os_add {
+                        line.push_str(&format!(", add {add}"));
+                    }
+                }
+                if let Some(pd) = &p.pd {
+                    line.push_str(&format!(", PD {pd}"));
+                }
+                line.push_str(&format!(" [{}]", p.status));
+                if let Some(expires_on) = &p.expires_on {
+                    line.push_str(&format!(", expires {expires_on}"));
+                }
+                line
+            }),
+        );
+        push_section(
+            &mut prompt,
+            "Medication prescriptions on file",
+            history.medication_prescriptions.iter().map(|p| {
+                let mut line = format!("id:{} — {}", p.id, p.medication_name);
+                if let Some(strength) = &p.strength {
+                    line.push_str(&format!(" {strength}"));
+                }
+                line.push_str(&format!(" — {}", p.sig));
+                if let Some(quantity) = &p.quantity {
+                    line.push_str(&format!(", qty {quantity}"));
+                }
+                if let Some(refills) = &p.refills {
+                    line.push_str(&format!(", {refills} refill(s)"));
+                }
+                line.push_str(&format!(" [{}]", p.status));
+                if let Some(expires_on) = &p.expires_on {
+                    line.push_str(&format!(", expires {expires_on}"));
+                }
+                line
+            }),
+        );
     }
 
     prompt.push_str("## Transcript of today's encounter (the thing to act on)\n\n");
@@ -320,7 +386,7 @@ pub fn build_clarification_prompt(
         ambiguous enough that a clarifying question was attached to it. The doctor has \
         now answered that question. Your job is to read the doctor's answer, in light of \
         the original transcript, the proposed action, and the patient's chart, and \
-        resolve it to the exact value that clarification was asking for.\n\n",
+        resolve it to the exact value that clarification was asking for.\n\n If the transcript is in French, respond in French. If the transcript is in English, respond in English.\n\n",
     );
 
     prompt.push_str(

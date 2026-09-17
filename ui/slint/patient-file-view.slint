@@ -36,6 +36,9 @@ export struct PatientFileData {
     lab-orders: [HistoryEntryRow],
     referrals: [HistoryEntryRow],
     refractions: [HistoryEntryRow],
+    visit-summaries: [HistoryEntryRow],
+    glasses-prescriptions: [HistoryEntryRow],
+    medication-prescriptions: [HistoryEntryRow],
     // Device-originated data (`server::dicom`) — populated separately
     // from everything above, via `DevicePatientItemsRequest`/`Response`
     // rather than `PatientFileRequest`/`Response`, since it comes from
@@ -186,7 +189,7 @@ export component PatientFileCard inherits VerticalLayout {
     in property <PatientFileData> file: {
         patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
         clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [], refractions: [], oct-images: [], pending-device-suggestions: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [], visit-summaries: [], glasses-prescriptions: [], medication-prescriptions: [], oct-images: [], pending-device-suggestions: [],
     };
     // Status of the most recently requested "Save" (empty when nothing's
     // in flight or nothing's been saved yet this session) — see
@@ -284,6 +287,21 @@ export component PatientFileCard inherits VerticalLayout {
     }
 
     HistorySection {
+        title: "Visit summaries";
+        entries: root.file.visit-summaries;
+    }
+
+    HistorySection {
+        title: "Glasses prescriptions";
+        entries: root.file.glasses-prescriptions;
+    }
+
+    HistorySection {
+        title: "Medication prescriptions";
+        entries: root.file.medication-prescriptions;
+    }
+
+    HistorySection {
         title: "Clinical notes";
         entries: root.file.clinical-notes;
     }
@@ -317,7 +335,7 @@ export component PatientFileView inherits Rectangle {
     in property <PatientFileData> file: {
         patient-id: "", legal-name: "", preferred-name: "", detail-line: "",
         clinical-notes: [], diagnoses: [], follow-ups: [], allergies: [],
-        medications: [], lab-orders: [], referrals: [], refractions: [], oct-images: [], pending-device-suggestions: [],
+        medications: [], lab-orders: [], referrals: [], refractions: [], visit-summaries: [], glasses-prescriptions: [], medication-prescriptions: [], oct-images: [], pending-device-suggestions: [],
     };
     in property <string> oct-status-text: "";
     in property <string> device-status-text: "";

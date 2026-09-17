@@ -120,6 +120,31 @@ impl From<domain::patient::ClinicalNoteEntry> for ClinicalNoteRecord {
     }
 }
 
+/// A single ended-encounter record — the transport projection of
+/// `domain::patient::VisitSummaryEntry`. See that type's doc comment
+/// for why this is its own record rather than folded into
+/// `ClinicalNoteRecord`, even though the shape is identical.
+#[derive(Debug, Clone, PacketField)]
+pub struct VisitSummaryRecord {
+    pub id: String,
+    pub summary: String,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: String,
+}
+
+impl From<domain::patient::VisitSummaryEntry> for VisitSummaryRecord {
+    fn from(value: domain::patient::VisitSummaryEntry) -> Self {
+        Self {
+            id: value.id.to_string(),
+            summary: value.summary,
+            authored_by: value.authored_by,
+            source: value.source,
+            created_at: value.created_at.to_rfc3339(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PacketField)]
 pub struct DiagnosisRecord {
     pub id: String,
@@ -300,6 +325,102 @@ impl From<domain::patient::RefractionEntry> for RefractionRecord {
     }
 }
 
+/// A formal glasses/spectacle prescription — the transport projection
+/// of `domain::patient::GlassesPrescriptionEntry`. See that type's doc
+/// comment for how this differs from `RefractionRecord`.
+#[derive(Debug, Clone, PacketField)]
+pub struct GlassesPrescriptionRecord {
+    pub id: String,
+    pub od_sphere: Option<String>,
+    pub od_cylinder: Option<String>,
+    pub od_axis: Option<i32>,
+    pub od_add: Option<String>,
+    pub os_sphere: Option<String>,
+    pub os_cylinder: Option<String>,
+    pub os_axis: Option<i32>,
+    pub os_add: Option<String>,
+    pub pd: Option<String>,
+    pub notes: Option<String>,
+    /// `"active"` | `"voided"`.
+    pub status: String,
+    /// `YYYY-MM-DD`, empty if none on file.
+    pub expires_on: String,
+    pub voided_reason: Option<String>,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: String,
+}
+
+impl From<domain::patient::GlassesPrescriptionEntry> for GlassesPrescriptionRecord {
+    fn from(value: domain::patient::GlassesPrescriptionEntry) -> Self {
+        Self {
+            id: value.id.to_string(),
+            od_sphere: value.od_sphere,
+            od_cylinder: value.od_cylinder,
+            od_axis: value.od_axis,
+            od_add: value.od_add,
+            os_sphere: value.os_sphere,
+            os_cylinder: value.os_cylinder,
+            os_axis: value.os_axis,
+            os_add: value.os_add,
+            pd: value.pd,
+            notes: value.notes,
+            status: value.status,
+            expires_on: value.expires_on.map(|d| d.to_string()).unwrap_or_default(),
+            voided_reason: value.voided_reason,
+            authored_by: value.authored_by,
+            source: value.source,
+            created_at: value.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// A formal medication prescription/Rx — the transport projection of
+/// `domain::patient::MedicationPrescriptionEntry`. See that type's doc
+/// comment for how this differs from `MedicationRecord`.
+#[derive(Debug, Clone, PacketField)]
+pub struct MedicationPrescriptionRecord {
+    pub id: String,
+    pub medication_name: String,
+    pub strength: Option<String>,
+    pub form: Option<String>,
+    pub sig: String,
+    pub quantity: Option<String>,
+    pub refills: Option<i32>,
+    pub generic_allowed: bool,
+    pub notes: Option<String>,
+    /// `"active"` | `"voided"`.
+    pub status: String,
+    /// `YYYY-MM-DD`, empty if none on file.
+    pub expires_on: String,
+    pub voided_reason: Option<String>,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: String,
+}
+
+impl From<domain::patient::MedicationPrescriptionEntry> for MedicationPrescriptionRecord {
+    fn from(value: domain::patient::MedicationPrescriptionEntry) -> Self {
+        Self {
+            id: value.id.to_string(),
+            medication_name: value.medication_name,
+            strength: value.strength,
+            form: value.form,
+            sig: value.sig,
+            quantity: value.quantity,
+            refills: value.refills,
+            generic_allowed: value.generic_allowed,
+            notes: value.notes,
+            status: value.status,
+            expires_on: value.expires_on.map(|d| d.to_string()).unwrap_or_default(),
+            voided_reason: value.voided_reason,
+            authored_by: value.authored_by,
+            source: value.source,
+            created_at: value.created_at.to_rfc3339(),
+        }
+    }
+}
+
 /// The full bundle of a patient's clinical history as it travels over
 /// the wire — transport projection of `domain::patient::PatientHistory`.
 #[derive(Debug, Clone, PacketField)]
@@ -312,6 +433,9 @@ pub struct PatientHistoryRecord {
     pub lab_orders: Vec<LabOrderRecord>,
     pub referrals: Vec<ReferralRecord>,
     pub refractions: Vec<RefractionRecord>,
+    pub visit_summaries: Vec<VisitSummaryRecord>,
+    pub glasses_prescriptions: Vec<GlassesPrescriptionRecord>,
+    pub medication_prescriptions: Vec<MedicationPrescriptionRecord>,
 }
 
 impl From<domain::patient::PatientHistory> for PatientHistoryRecord {
@@ -325,6 +449,9 @@ impl From<domain::patient::PatientHistory> for PatientHistoryRecord {
             lab_orders: value.lab_orders.into_iter().map(Into::into).collect(),
             referrals: value.referrals.into_iter().map(Into::into).collect(),
             refractions: value.refractions.into_iter().map(Into::into).collect(),
+            visit_summaries: value.visit_summaries.into_iter().map(Into::into).collect(),
+            glasses_prescriptions: value.glasses_prescriptions.into_iter().map(Into::into).collect(),
+            medication_prescriptions: value.medication_prescriptions.into_iter().map(Into::into).collect(),
         }
     }
 }

@@ -2,8 +2,9 @@
 //! top of `services::connection`.
 
 use packets::patient::{
-    AllergyRecord, ClinicalNoteRecord, DiagnosisRecord, FollowUpRecord, LabOrderRecord,
-    MedicationRecord, PatientHistoryRecord, PatientRecord, RefractionRecord, ReferralRecord,
+    AllergyRecord, ClinicalNoteRecord, DiagnosisRecord, FollowUpRecord, GlassesPrescriptionRecord,
+    LabOrderRecord, MedicationPrescriptionRecord, MedicationRecord, PatientHistoryRecord,
+    PatientRecord, RefractionRecord, ReferralRecord, VisitSummaryRecord,
 };
 use slint::{ModelRc, VecModel};
 use tokio::sync::broadcast;
@@ -151,7 +152,7 @@ pub fn format_detail_line(record: &PatientRecord) -> String {
 /// date/locale/provenance-labeling logic, the same "format in Rust,
 /// render in Slint" split `to_patient_rows` above already uses.
 pub fn to_patient_file_data(patient: &PatientRecord, history: &PatientHistoryRecord) -> PatientFileData {
-    println!("Building PatientFileData for patient {} with {} clinical notes, {} diagnoses, {} follow-ups, {} allergies, {} medications, {} lab orders, {} referrals, and {} refractions", patient.patient_id, history.clinical_notes.len(), history.diagnoses.len(), history.follow_ups.len(), history.allergies.len(), history.medications.len(), history.lab_orders.len(), history.referrals.len(), history.refractions.len());
+    println!("Building PatientFileData for patient {} with {} clinical notes, {} diagnoses, {} follow-ups, {} allergies, {} medications, {} lab orders, {} referrals, {} refractions, {} visit summaries, {} glasses prescriptions, and {} medication prescriptions", patient.patient_id, history.clinical_notes.len(), history.diagnoses.len(), history.follow_ups.len(), history.allergies.len(), history.medications.len(), history.lab_orders.len(), history.referrals.len(), history.refractions.len(), history.visit_summaries.len(), history.glasses_prescriptions.len(), history.medication_prescriptions.len());
     PatientFileData {
         patient_id: patient.patient_id.clone().into(),
         legal_name: patient.legal_name.clone().into(),
@@ -165,6 +166,9 @@ pub fn to_patient_file_data(patient: &PatientRecord, history: &PatientHistoryRec
         lab_orders: to_rows(&history.lab_orders, lab_order_row),
         referrals: to_rows(&history.referrals, referral_row),
         refractions: to_rows(&history.refractions, refraction_row),
+        visit_summaries: to_rows(&history.visit_summaries, visit_summary_row),
+        glasses_prescriptions: to_rows(&history.glasses_prescriptions, glasses_prescription_row),
+        medication_prescriptions: to_rows(&history.medication_prescriptions, medication_prescription_row),
         // Device-originated data (`server::dicom`) has no place in
         // `PatientHistoryRecord`/`PatientFileRequest` — it comes back
         // separately via `DevicePatientItemsRequest`/`Response` and is
@@ -188,15 +192,23 @@ fn to_rows<T>(entries: &[T], format: impl Fn(&T) -> HistoryEntryRow) -> ModelRc<
 /// is optional), where it came from, and when, using just the date
 /// portion of `created_at`'s RFC 3339 timestamp since the exact time
 /// isn't meaningful to a clinician skimming a chart.
-fn format_meta(authored_by: &Option<String>, source: &str, created_at: &str) -> String {
+fn format_meta(authored_by: &Option<String>, _source: &str, created_at: &str) -> String {
     let who = authored_by.as_deref().unwrap_or("Unknown");
     let date = created_at.split('T').next().unwrap_or(created_at);
-    format!("{who} • {source} • {date}")
+    //format!("{who} • {source} • {date}")
+    format!("{who} • {date}")
 }
 
 fn clinical_note_row(entry: &ClinicalNoteRecord) -> HistoryEntryRow {
     HistoryEntryRow {
         line: entry.note.clone().into(),
+        meta: format_meta(&entry.authored_by, &entry.source, &entry.created_at).into(),
+    }
+}
+
+fn visit_summary_row(entry: &VisitSummaryRecord) -> HistoryEntryRow {
+    HistoryEntryRow {
+        line: entry.summary.clone().into(),
         meta: format_meta(&entry.authored_by, &entry.source, &entry.created_at).into(),
     }
 }
@@ -298,6 +310,87 @@ fn refraction_row(entry: &RefractionRecord) -> HistoryEntryRow {
         line: line.into(),
         meta: format_meta(&entry.authored_by, &entry.source, &entry.created_at).into(),
     }
+}
+
+fn glasses_prescription_row(entry: &GlassesPrescriptionRecord) -> HistoryEntryRow {
+    let mut line = String::new();
+    if entry.od_sphere.is_some() {
+        line.push_str(&format!(
+            "OD: {}",
+            format_eye_rx(&entry.od_sphere, &entry.od_cylinder, entry.od_axis, &entry.od_add)
+        ));
+    }
+    if entry.os_sphere.is_some() {
+        if !line.is_empty() {
+            line.push_str("  ");
+        }
+        line.push_str(&format!(
+            "OS: {}",
+            format_eye_rx(&entry.os_sphere, &entry.os_cylinder, entry.os_axis, &entry.os_add)
+        ));
+    }
+    if let Some(pd) = &entry.pd {
+        line.push_str(&format!("  PD {pd}"));
+    }
+    if line.is_empty() {
+        line = "Glasses prescription".to_string();
+    }
+
+    let mut meta = format_meta(&entry.authored_by, &entry.source, &entry.created_at);
+    meta.push_str(&format!(" • {}", entry.status));
+    if !entry.expires_on.is_empty() {
+        meta.push_str(&format!(" • expires {}", entry.expires_on));
+    }
+    if let Some(reason) = &entry.voided_reason {
+        meta.push_str(&format!(" — voided: {reason}"));
+    }
+
+    HistoryEntryRow { line: line.into(), meta: meta.into() }
+}
+
+fn format_eye_rx(
+    sphere: &Option<String>,
+    cylinder: &Option<String>,
+    axis: Option<i32>,
+    add: &Option<String>,
+) -> String {
+    let Some(sphere) = sphere else { return String::new() };
+    let mut line = sphere.clone();
+    if let Some(cylinder) = cylinder {
+        line.push_str(&format!(" / {cylinder}"));
+        if let Some(axis) = axis {
+            line.push_str(&format!(" × {axis}°"));
+        }
+    }
+    if let Some(add) = add {
+        line.push_str(&format!(" add {add}"));
+    }
+    line
+}
+
+fn medication_prescription_row(entry: &MedicationPrescriptionRecord) -> HistoryEntryRow {
+    let mut line = entry.medication_name.clone();
+    if let Some(strength) = &entry.strength {
+        line.push_str(&format!(" {strength}"));
+    }
+    line.push_str(&format!(" — {}", entry.sig));
+    if let Some(quantity) = &entry.quantity {
+        line.push_str(&format!(", qty {quantity}"));
+    }
+    if let Some(refills) = entry.refills {
+        line.push_str(&format!(", {refills} refill(s)"));
+    }
+
+    let mut meta = format_meta(&entry.authored_by, &entry.source, &entry.created_at);
+    meta.push_str(&format!(" • {}", entry.status));
+    if !entry.expires_on.is_empty() {
+        meta.push_str(&format!(" • expires {}", entry.expires_on));
+    }
+    if let Some(reason) = &entry.voided_reason {
+        meta.push_str(&format!(" — voided: {reason}"));
+    }
+
+    HistoryEntryRow { line: line.into(), meta: meta.into() }
 }
 
 fn referral_row(entry: &ReferralRecord) -> HistoryEntryRow {

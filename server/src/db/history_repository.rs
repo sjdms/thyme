@@ -1,8 +1,9 @@
-use chrono::{Duration, Utc};
+use chrono::{Duration, Months, NaiveDate, Utc};
 use domain::action::ThymeAction;
 use domain::patient::{
-    AllergyEntry, ClinicalNoteEntry, DiagnosisEntry, FollowUpEntry, LabOrderEntry,
-    MedicationEntry, PatientHistory, RefractionEntry, ReferralEntry,
+    AllergyEntry, ClinicalNoteEntry, DiagnosisEntry, FollowUpEntry, GlassesPrescriptionEntry,
+    LabOrderEntry, MedicationEntry, MedicationPrescriptionEntry, PatientHistory, RefractionEntry,
+    ReferralEntry, VisitSummaryEntry,
 };
 use sqlx::{Pool, Row};
 use uuid::Uuid;
@@ -37,6 +38,31 @@ pub struct HistoryRepository {
 /// history rather than growing without bound over a patient's lifetime
 /// — see `domain::patient::PatientHistory`'s doc comment.
 const HISTORY_LIMIT: i64 = 20;
+
+/// Default validity window for a glasses prescription when
+/// `ThymeAction::IssueGlassesPrescription::expires_in_months` wasn't
+/// stated — 24 months is a common upper bound across jurisdictions for
+/// an adult spectacle prescription; a clinic with a different local
+/// requirement can still have the doctor state an explicit duration.
+const GLASSES_PRESCRIPTION_DEFAULT_VALIDITY_MONTHS: i32 = 24;
+
+/// Default validity window for a medication prescription when
+/// `ThymeAction::IssueMedicationPrescription::expires_in_months` wasn't
+/// stated — 12 months is a common default for a non-controlled
+/// medication; a controlled substance or unusual case is exactly when
+/// the doctor is expected to state a duration explicitly instead of
+/// relying on this default.
+const MEDICATION_PRESCRIPTION_DEFAULT_VALIDITY_MONTHS: i32 = 12;
+
+/// `months` from today, or `None` if `months` is negative/absurdly
+/// large (never expected from a real transcript, but `expires_in_months`
+/// is model-provided, so this stays defensive rather than panicking on
+/// a malformed value) — a prescription simply gets no expiration date
+/// in that case rather than the whole action failing.
+fn expires_on_from_months(months: i32) -> Option<NaiveDate> {
+    let months = u32::try_from(months).ok()?;
+    Utc::now().date_naive().checked_add_months(Months::new(months))
+}
 
 impl HistoryRepository {
     pub fn new(pool: Pool<sqlx::Postgres>) -> Self {
@@ -226,6 +252,92 @@ impl HistoryRepository {
         })
         .collect::<Result<Vec<_>>>()?;
 
+        let visit_summaries = sqlx::query(
+            r#"SELECT id, summary, authored_by, source, created_at FROM visit_summaries
+               WHERE patient_id = $1 ORDER BY created_at DESC LIMIT $2"#,
+        )
+        .bind(patient_id)
+        .bind(HISTORY_LIMIT)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(VisitSummaryEntry {
+                id: row.try_get("id")?,
+                summary: row.try_get("summary")?,
+                authored_by: row.try_get("authored_by")?,
+                source: row.try_get("source")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+        let glasses_prescriptions = sqlx::query(
+            r#"SELECT id, od_sphere, od_cylinder, od_axis, od_add, os_sphere, os_cylinder, os_axis, os_add,
+                      pd, notes, status, expires_on, voided_reason, authored_by, source, created_at
+               FROM glasses_prescriptions
+               WHERE patient_id = $1 ORDER BY created_at DESC LIMIT $2"#,
+        )
+        .bind(patient_id)
+        .bind(HISTORY_LIMIT)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(GlassesPrescriptionEntry {
+                id: row.try_get("id")?,
+                od_sphere: row.try_get("od_sphere")?,
+                od_cylinder: row.try_get("od_cylinder")?,
+                od_axis: row.try_get("od_axis")?,
+                od_add: row.try_get("od_add")?,
+                os_sphere: row.try_get("os_sphere")?,
+                os_cylinder: row.try_get("os_cylinder")?,
+                os_axis: row.try_get("os_axis")?,
+                os_add: row.try_get("os_add")?,
+                pd: row.try_get("pd")?,
+                notes: row.try_get("notes")?,
+                status: row.try_get("status")?,
+                expires_on: row.try_get("expires_on")?,
+                voided_reason: row.try_get("voided_reason")?,
+                authored_by: row.try_get("authored_by")?,
+                source: row.try_get("source")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+        let medication_prescriptions = sqlx::query(
+            r#"SELECT id, medication_name, strength, form, sig, quantity, refills, generic_allowed,
+                      notes, status, expires_on, voided_reason, authored_by, source, created_at
+               FROM medication_prescriptions
+               WHERE patient_id = $1 ORDER BY created_at DESC LIMIT $2"#,
+        )
+        .bind(patient_id)
+        .bind(HISTORY_LIMIT)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(MedicationPrescriptionEntry {
+                id: row.try_get("id")?,
+                medication_name: row.try_get("medication_name")?,
+                strength: row.try_get("strength")?,
+                form: row.try_get("form")?,
+                sig: row.try_get("sig")?,
+                quantity: row.try_get("quantity")?,
+                refills: row.try_get("refills")?,
+                generic_allowed: row.try_get("generic_allowed")?,
+                notes: row.try_get("notes")?,
+                status: row.try_get("status")?,
+                expires_on: row.try_get("expires_on")?,
+                voided_reason: row.try_get("voided_reason")?,
+                authored_by: row.try_get("authored_by")?,
+                source: row.try_get("source")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
         Ok(PatientHistory {
             clinical_notes,
             diagnoses,
@@ -235,6 +347,9 @@ impl HistoryRepository {
             lab_orders,
             referrals,
             refractions,
+            visit_summaries,
+            glasses_prescriptions,
+            medication_prescriptions,
         })
     }
 
@@ -248,7 +363,10 @@ impl HistoryRepository {
     ///
     /// `ThymeAction::NoActionNeeded` writes nothing — there is no chart
     /// entry for "nothing happened"; its summary is just an
-    /// acknowledgement.
+    /// acknowledgement. `ThymeAction::EndVisit` writes at most a
+    /// `visit_summaries` row (see that arm below) and nothing else —
+    /// ending the visit itself is handled one layer up, by whoever
+    /// calls this method (see `ThymeServer::apply_action_with_side_effects`).
     pub async fn apply_action(
         &self,
         patient_id: Uuid,
@@ -420,6 +538,134 @@ impl HistoryRepository {
                        WHERE id = $1 AND patient_id = $2 AND deleted_at IS NULL"#,
                 )
                 .bind(diagnosis_id)
+                .bind(patient_id)
+                .bind(reason)
+                .execute(&self.pool)
+                .await?;
+            }
+            ThymeAction::EndVisit { summary, .. } => {
+                // No chart entry when the model didn't produce a
+                // wrap-up worth keeping — same reasoning as
+                // `NoActionNeeded` above, just conditional on one field
+                // instead of the whole variant. Ending the visit itself
+                // (the queue-status side of this action) is not this
+                // repository's job — see
+                // `ThymeServer::apply_action_with_side_effects`, which
+                // wraps every call to this method and is where that
+                // happens, since it needs `QueueRepository`, which
+                // `HistoryRepository` deliberately doesn't have (see
+                // this struct's doc comment).
+                if let Some(summary) = summary {
+                    sqlx::query(
+                        r#"INSERT INTO visit_summaries (patient_id, summary, authored_by, source)
+                           VALUES ($1, $2, $3, $4)"#,
+                    )
+                    .bind(patient_id)
+                    .bind(summary)
+                    .bind(authored_by)
+                    .bind(source)
+                    .execute(&self.pool)
+                    .await?;
+                }
+            }
+            ThymeAction::IssueGlassesPrescription {
+                od_sphere,
+                od_cylinder,
+                od_axis,
+                od_add,
+                os_sphere,
+                os_cylinder,
+                os_axis,
+                os_add,
+                pd,
+                expires_in_months,
+                notes,
+                ..
+            } => {
+                let expires_on = expires_on_from_months(
+                    expires_in_months.unwrap_or(GLASSES_PRESCRIPTION_DEFAULT_VALIDITY_MONTHS),
+                );
+                sqlx::query(
+                    r#"INSERT INTO glasses_prescriptions
+                        (patient_id, od_sphere, od_cylinder, od_axis, od_add,
+                         os_sphere, os_cylinder, os_axis, os_add, pd, notes,
+                         expires_on, authored_by, source)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+                )
+                .bind(patient_id)
+                .bind(od_sphere)
+                .bind(od_cylinder)
+                .bind(od_axis)
+                .bind(od_add)
+                .bind(os_sphere)
+                .bind(os_cylinder)
+                .bind(os_axis)
+                .bind(os_add)
+                .bind(pd)
+                .bind(notes)
+                .bind(expires_on)
+                .bind(authored_by)
+                .bind(source)
+                .execute(&self.pool)
+                .await?;
+            }
+            ThymeAction::VoidGlassesPrescription { prescription_id, reason, .. } => {
+                sqlx::query(
+                    r#"UPDATE glasses_prescriptions
+                       SET status = 'voided',
+                           voided_reason = COALESCE($3, voided_reason)
+                       WHERE id = $1 AND patient_id = $2 AND status = 'active'"#,
+                )
+                .bind(prescription_id)
+                .bind(patient_id)
+                .bind(reason)
+                .execute(&self.pool)
+                .await?;
+            }
+            ThymeAction::IssueMedicationPrescription {
+                medication_name,
+                strength,
+                form,
+                sig,
+                quantity,
+                refills,
+                generic_allowed,
+                expires_in_months,
+                notes,
+                ..
+            } => {
+                let expires_on = expires_on_from_months(
+                    expires_in_months.unwrap_or(MEDICATION_PRESCRIPTION_DEFAULT_VALIDITY_MONTHS),
+                );
+                sqlx::query(
+                    r#"INSERT INTO medication_prescriptions
+                        (patient_id, medication_name, strength, form, sig, quantity,
+                         refills, generic_allowed, notes, expires_on, authored_by, source)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                )
+                .bind(patient_id)
+                .bind(medication_name)
+                .bind(strength)
+                .bind(form)
+                .bind(sig)
+                .bind(quantity)
+                .bind(refills)
+                .bind(generic_allowed)
+                .bind(notes)
+                .bind(expires_on)
+                .bind(authored_by)
+                .bind(source)
+                .execute(&self.pool)
+                .await?;
+            }
+            ThymeAction::VoidMedicationPrescription { prescription_id, reason, .. } => {
+                sqlx::query(
+                    r#"UPDATE medication_prescriptions
+                       SET status = 'voided',
+                           voided_reason = COALESCE($3, voided_reason)
+                       WHERE id = $1 AND patient_id = $2 AND status = 'active'"#,
+                )
+                .bind(prescription_id)
                 .bind(patient_id)
                 .bind(reason)
                 .execute(&self.pool)

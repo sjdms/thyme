@@ -2,3 +2,5 @@
 target
 *.zip
 Cargo.lock
+.vscode
+dicom-storage/*

@@ -186,12 +186,60 @@ pub enum ThymeAction {
         clarification: Option<Clarification>,
     },
 
-    /*#[action_description("Marks the end of a patient's visit to the doctor, fire it when the doctor says something like `End the visit` or `That's all for today`. This action is not clinical, the AI should provide a summary of the visit and any follow-up instructions, but it should not add any new diagnoses, medications, or other chart entries unless explicitly required. It is purely administrative.")]
+    #[action_description("Marks the end of a patient's visit to the doctor, fire it when the doctor says something like `End the visit` or `That's all for today`. This action is not clinical, the AI should provide a summary of the visit and any follow-up instructions, but it should not add any new diagnoses, medications, or other chart entries unless explicitly required. It is purely administrative. The summary should be derived from the transcript and also from all the chart actions that were taken during the visit and anything related to it from the patient's history. But not from the history alone.")]
     EndVisit {
         summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clarification: Option<Clarification>,
-    }*/
+    },
+
+    #[action_description("Issues a formal glasses/spectacle prescription for the patient — a document meant for the patient to take to an optician to have glasses made, distinct from AddRefraction which just records a raw eye measurement. Only use this when the doctor explicitly says they are writing or issuing a prescription for glasses, not merely dictating a refraction reading (propose AddRefraction for that instead, possibly alongside this). Include whichever of od_sphere/od_cylinder/od_axis/od_add and os_sphere/os_cylinder/os_axis/os_add the doctor stated for each eye — leave fields out rather than guessing if not stated. `pd` is the pupillary distance in millimeters, if stated. `expires_in_months` is how long the prescription should be valid for; leave it out to use the standard default (see IssueGlassesPrescription's expiration handling) unless the doctor stated a specific duration. `notes` is any other free-text instruction for the patient or optician (e.g. lens type, prism, tint).")]
+    IssueGlassesPrescription {
+        od_sphere: Option<String>,
+        od_cylinder: Option<String>,
+        od_axis: Option<i32>,
+        od_add: Option<String>,
+        os_sphere: Option<String>,
+        os_cylinder: Option<String>,
+        os_axis: Option<i32>,
+        os_add: Option<String>,
+        pd: Option<String>,
+        expires_in_months: Option<i32>,
+        notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clarification: Option<Clarification>,
+    },
+
+    #[action_description("Voids a glasses prescription already on the patient's chart that should no longer be valid — issued in error, superseded by a newly issued prescription, or the doctor explicitly says to cancel it. `prescription_id` must be copied exactly from the `id` of one of the glasses prescriptions listed in the patient's history. `reason` is the doctor's stated reason, if any.")]
+    VoidGlassesPrescription {
+        prescription_id: Uuid,
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clarification: Option<Clarification>,
+    },
+
+    #[action_description("Issues a formal medication prescription (Rx) for the patient — a document meant for a pharmacy to dispense from, distinct from AddMedication which just records that the patient is taking something. Only use this when the doctor explicitly writes or issues a prescription, not merely notes a medication the patient is already on (propose AddMedication for that instead, possibly alongside this). `medication_name` is the drug name. `strength` is the dose strength (e.g. \"500mg\", \"0.5%\"), if stated. `form` is the dosage form (e.g. \"tablet\", \"eye drops\", \"ointment\"), if stated. `sig` is the patient-facing directions for use (e.g. \"1 drop in each eye twice daily\") — a prescription without directions is not meaningful, so only propose this action once the doctor has actually stated directions. `quantity` is how much to dispense (e.g. \"30 tablets\", \"1 bottle\"), if stated. `refills` is the number of refills authorized, if stated. `generic_allowed` should be true unless the doctor explicitly says brand-name only or no substitution. `expires_in_months` is how long the prescription is valid for; leave it out to use the standard default unless the doctor stated a specific duration. `notes` is anything else relevant.")]
+    IssueMedicationPrescription {
+        medication_name: String,
+        strength: Option<String>,
+        form: Option<String>,
+        sig: String,
+        quantity: Option<String>,
+        refills: Option<i32>,
+        generic_allowed: bool,
+        expires_in_months: Option<i32>,
+        notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clarification: Option<Clarification>,
+    },
+
+    #[action_description("Voids a medication prescription already on the patient's chart that should no longer be valid — issued in error, superseded by a newly issued prescription, or the doctor explicitly says to cancel it. `prescription_id` must be copied exactly from the `id` of one of the medication prescriptions listed in the patient's history. `reason` is the doctor's stated reason, if any.")]
+    VoidMedicationPrescription {
+        prescription_id: Uuid,
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clarification: Option<Clarification>,
+    },
 }
 
 impl ThymeAction {
@@ -216,7 +264,11 @@ impl ThymeAction {
             ThymeAction::DiscontinueMedication { .. } => "DiscontinueMedication",
             ThymeAction::UpdateDiagnosis { .. } => "UpdateDiagnosis",
             ThymeAction::DeleteDiagnosis { .. } => "DeleteDiagnosis",
-            //ThymeAction::EndVisit { .. } => "EndVisit",
+            ThymeAction::EndVisit { .. } => "EndVisit",
+            ThymeAction::IssueGlassesPrescription { .. } => "IssueGlassesPrescription",
+            ThymeAction::VoidGlassesPrescription { .. } => "VoidGlassesPrescription",
+            ThymeAction::IssueMedicationPrescription { .. } => "IssueMedicationPrescription",
+            ThymeAction::VoidMedicationPrescription { .. } => "VoidMedicationPrescription",
         }
     }
 
@@ -244,11 +296,18 @@ impl ThymeAction {
     ///
     /// Every other variant changes what care the patient might
     /// receive (a diagnosis, a medication, an allergy flag, an order, a
-    /// referral, a follow-up) and always waits for
+    /// referral, a follow-up, a prescription) and always waits for
     /// `ApplySuggestedActionRequest`/`ApplyAllSuggestedActionsRequest`,
     /// no matter how unambiguous the transcript seemed — see
     /// `server::server::ThymeServer::process_transcription`, the one
     /// place this method's result is actually acted on.
+    ///
+    /// `IssueGlassesPrescription`/`IssueMedicationPrescription` in
+    /// particular are deliberately never candidates for this allowlist,
+    /// FIXME below notwithstanding: a prescription is a document with
+    /// real-world consequences the moment it's handed to a patient or
+    /// phoned to a pharmacy, which is a categorically higher bar than
+    /// "wrong text sitting on a chart until someone notices."
     ///
     /// `false` whenever `clarification()` is `Some` — even for one of
     /// the three normally-auto-applied variants below — since an action
@@ -283,7 +342,11 @@ impl ThymeAction {
             ThymeAction::DiscontinueMedication { clarification, .. } => clarification.as_ref(),
             ThymeAction::UpdateDiagnosis { clarification, .. } => clarification.as_ref(),
             ThymeAction::DeleteDiagnosis { clarification, .. } => clarification.as_ref(),
-            //ThymeAction::EndVisit { clarification, .. } => clarification.as_ref(),
+            ThymeAction::EndVisit { clarification, .. } => clarification.as_ref(),
+            ThymeAction::IssueGlassesPrescription { clarification, .. } => clarification.as_ref(),
+            ThymeAction::VoidGlassesPrescription { clarification, .. } => clarification.as_ref(),
+            ThymeAction::IssueMedicationPrescription { clarification, .. } => clarification.as_ref(),
+            ThymeAction::VoidMedicationPrescription { clarification, .. } => clarification.as_ref(),
         }
     }
 
@@ -359,7 +422,7 @@ impl ThymeAction {
                 clarification
             }
             // `medication_id`/`diagnosis_id` are the "main subject" for
-            // the four record-referencing variants below — a
+            // these record-referencing variants — a
             // clarification on one of these means the model couldn't
             // tell which existing medication/diagnosis (from the
             // patient's history, where `choices` is expected to have
@@ -409,12 +472,51 @@ impl ThymeAction {
                 }
                 clarification
             },
-            /*ThymeAction::EndVisit { clarification, .. } => {
+            ThymeAction::EndVisit { clarification, .. } => {
                 if clarification.is_none() {
                     return;
                 }
                 clarification
-            }*/
+            }
+            // No single "main subject" field to overwrite the way
+            // `AddMedication`'s `name` or `DeleteDiagnosis`'s
+            // `diagnosis_id` do — a glasses prescription's ambiguity is
+            // inherently spread across up to eight per-eye fields at
+            // once, so there's nothing one clarification answer could
+            // unambiguously fill in. Same shape as `ScheduleFollowUp`
+            // above: just clear it. In practice this means the model
+            // should rarely attach a clarification to this action at
+            // all (per the "Clarifications" section of
+            // `server::ai::prompt::build_prompt`, it's told to prefer
+            // omitting an uncertain field over guessing), and a
+            // clinician resolving one here is really just dismissing
+            // the question rather than answering it.
+            ThymeAction::IssueGlassesPrescription { clarification, .. } => clarification,
+            ThymeAction::VoidGlassesPrescription { prescription_id, clarification, .. } => {
+                if clarification.is_none() {
+                    return;
+                }
+                if let Ok(id) = Uuid::parse_str(answer.trim()) {
+                    *prescription_id = id;
+                }
+                clarification
+            }
+            ThymeAction::IssueMedicationPrescription { medication_name, clarification, .. } => {
+                if clarification.is_none() {
+                    return;
+                }
+                *medication_name = answer.to_string();
+                clarification
+            }
+            ThymeAction::VoidMedicationPrescription { prescription_id, clarification, .. } => {
+                if clarification.is_none() {
+                    return;
+                }
+                if let Ok(id) = Uuid::parse_str(answer.trim()) {
+                    *prescription_id = id;
+                }
+                clarification
+            }
         };
         *slot = None;
     }
@@ -502,11 +604,77 @@ impl ThymeAction {
                 Some(reason) => format!("Remove diagnosis — reason: {reason}"),
                 None => "Remove diagnosis".to_string(),
             },
-            /*ThymeAction::EndVisit { summary, clarification } => match (summary, clarification) {
+            ThymeAction::EndVisit { summary, clarification } => match (summary, clarification) {
                 (Some(summary), _) => format!("End visit — summary: {summary}"),
                 (None, Some(clarification)) => format!("End visit — clarification: {}", clarification.message),
                 (None, None) => "End visit".to_string(),
-            },*/
+            },
+            ThymeAction::IssueGlassesPrescription {
+                od_sphere,
+                od_cylinder,
+                od_axis,
+                od_add,
+                os_sphere,
+                os_cylinder,
+                os_axis,
+                os_add,
+                pd,
+                ..
+            } => {
+                let mut summary = "Issue glasses prescription".to_string();
+                if let Some(eye_summary) = describe_eye("OD", od_sphere, od_cylinder, *od_axis, od_add) {
+                    summary.push_str(&format!(" — {eye_summary}"));
+                }
+                if let Some(eye_summary) = describe_eye("OS", os_sphere, os_cylinder, *os_axis, os_add) {
+                    summary.push_str(&format!(", {eye_summary}"));
+                }
+                if let Some(pd) = pd {
+                    summary.push_str(&format!(", PD {pd}"));
+                }
+                summary
+            }
+            ThymeAction::VoidGlassesPrescription { reason, .. } => match reason {
+                Some(reason) => format!("Void glasses prescription — reason: {reason}"),
+                None => "Void glasses prescription".to_string(),
+            },
+            ThymeAction::IssueMedicationPrescription { medication_name, strength, sig, .. } => {
+                let mut summary = format!("Issue prescription: {medication_name}");
+                if let Some(strength) = strength {
+                    summary.push_str(&format!(" {strength}"));
+                }
+                summary.push_str(&format!(" — {sig}"));
+                summary
+            }
+            ThymeAction::VoidMedicationPrescription { reason, .. } => match reason {
+                Some(reason) => format!("Void prescription — reason: {reason}"),
+                None => "Void prescription".to_string(),
+            },
         }
     }
+}
+
+/// Shared by `ThymeAction::describe`'s glasses-prescription arm to
+/// format one eye's line the same way `AddRefraction`'s own summary
+/// does — kept as a free function since building it inline once per
+/// eye would otherwise duplicate this same sphere/cylinder/axis/add
+/// formatting twice.
+fn describe_eye(
+    eye: &str,
+    sphere: &Option<String>,
+    cylinder: &Option<String>,
+    axis: Option<i32>,
+    add: &Option<String>,
+) -> Option<String> {
+    let sphere = sphere.as_ref()?;
+    let mut line = format!("{eye}: sphere {sphere}");
+    if let Some(cylinder) = cylinder {
+        line.push_str(&format!(", cylinder {cylinder}"));
+    }
+    if let Some(axis) = axis {
+        line.push_str(&format!(" x {axis}"));
+    }
+    if let Some(add) = add {
+        line.push_str(&format!(", add {add}"));
+    }
+    Some(line)
 }

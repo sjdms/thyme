@@ -10,7 +10,7 @@ pub(crate) async fn initialize_database() -> Result<Pool<sqlx::Postgres>> {
         .connect(&database_url)
         .await?;
 
-    //sqlx::migrate!("./migrations").run(&pool).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;;
 
     Ok(pool)
 }

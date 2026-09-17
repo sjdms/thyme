@@ -151,6 +151,36 @@ impl QueueRepository {
         Ok(row.try_get("present")?)
     }
 
+    /// Ends a patient's visit by advancing their queue entry straight
+    /// from `"with_doctor"` to `"done"`, if they currently have one —
+    /// the server-side effect of `domain::action::ThymeAction::EndVisit`
+    /// (see `ThymeServer::apply_action_with_side_effects`), keyed by
+    /// patient id rather than queue entry id since that's all a
+    /// `ThymeAction` ever carries (it has no notion of a queue entry).
+    /// One atomic `UPDATE` rather than a `current_with_doctor` lookup
+    /// followed by `advance_status`, so there's no window between the
+    /// two where the patient's status could have already changed out
+    /// from under this call.
+    ///
+    /// A no-op, not an error, when the patient has no `"with_doctor"`
+    /// entry — already ended some other way (the doctor manually
+    /// clicked "End encounter" first), or the AI's timing was off.
+    /// Ending an already-ended visit isn't a failure worth surfacing.
+    /// Returns whether an entry was actually advanced, so a caller can
+    /// decide whether `queue_changed` needs firing.
+    pub async fn end_visit(&self, patient_id: Uuid) -> Result<bool> {
+        let result = sqlx::query(
+            r#"UPDATE patient_queue
+               SET status = 'done', updated_at = now()
+               WHERE patient_id = $1 AND status = 'with_doctor'"#,
+        )
+        .bind(patient_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn fetch_entry(&self, queue_id: Uuid) -> Result<PatientQueueEntry> {
         let query = format!(
             r#"

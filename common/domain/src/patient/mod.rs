@@ -31,6 +31,27 @@ pub struct ClinicalNoteEntry {
     pub created_at: DateTime<Utc>,
 }
 
+/// The administrative record of one encounter ending
+/// (`ThymeAction::EndVisit`) — kept in its own table
+/// (`migrations/0018_create_visit_summaries_table.sql`) rather than
+/// folded into `clinical_notes`, even though the two are structurally
+/// identical, because they answer different questions: a clinical note
+/// is *clinical content* someone chose to record mid-visit, while a
+/// visit summary is the administrative closing statement for one whole
+/// encounter — a chart view (or a future "past visits" list) wants to
+/// tell those apart without parsing note text. `summary` is optional
+/// (`ThymeAction::EndVisit::summary` is too — see that variant's doc
+/// comment) because ending a visit is not conditional on the AI having
+/// produced a wrap-up worth keeping.
+#[derive(Debug, Clone)]
+pub struct VisitSummaryEntry {
+    pub id: Uuid,
+    pub summary: String,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A diagnosis on a patient's chart, with an optional ICD-10 `code`.
 ///
 /// `status`/`notes` back `ThymeAction::UpdateDiagnosis`; `HistoryRepository::fetch`
@@ -145,6 +166,87 @@ pub struct RefractionEntry {
     pub created_at: DateTime<Utc>,
 }
 
+/// A formal spectacle/glasses prescription (`ThymeAction::IssueGlassesPrescription`)
+/// — a document meant for the patient to take to an optician, not a raw
+/// measurement. Deliberately its own concept rather than a flag on
+/// `RefractionEntry`: a refraction is a *reading* taken during an
+/// exam (there can be several, e.g. a subjective and objective
+/// refraction, or a repeat measurement), while a prescription is a
+/// *decision* the doctor makes to issue — possibly based on a refraction
+/// reading, possibly overriding one, but not the same record. Both eyes
+/// live on one row here (unlike `RefractionEntry`, which is one row per
+/// eye per reading) because that's what a real prescription document
+/// is: one artifact covering both eyes plus `pd`, since an optician
+/// can't actually make a single lens's glasses from half a
+/// prescription.
+#[derive(Debug, Clone)]
+pub struct GlassesPrescriptionEntry {
+    pub id: Uuid,
+    pub od_sphere: Option<String>,
+    pub od_cylinder: Option<String>,
+    pub od_axis: Option<i32>,
+    pub od_add: Option<String>,
+    pub os_sphere: Option<String>,
+    pub os_cylinder: Option<String>,
+    pub os_axis: Option<i32>,
+    pub os_add: Option<String>,
+    /// Pupillary distance in millimeters, as dictated (kept as `String`
+    /// for the same round-tripping reason as `sphere`/`cylinder`/`add`
+    /// above — a value like `"32/30"` for separate near/far PDs isn't
+    /// numeric).
+    pub pd: Option<String>,
+    pub notes: Option<String>,
+    /// `"active"` | `"voided"` — see `ThymeAction::VoidGlassesPrescription`.
+    /// No separate `"expired"` status: `expires_on` already says
+    /// whether a still-`"active"` row is past its date, so a status
+    /// value that could drift out of sync with it would only add a
+    /// second, potentially-stale source of truth for the same fact.
+    pub status: String,
+    pub expires_on: Option<NaiveDate>,
+    pub voided_reason: Option<String>,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A formal medication prescription/Rx (`ThymeAction::IssueMedicationPrescription`)
+/// — an authorization for a pharmacy to dispense, not a note that the
+/// patient is taking something. Deliberately separate from
+/// `MedicationEntry`: the medication list answers "what is this
+/// patient currently on" (relevant for interaction checks, allergy
+/// review, a quick chart skim), while this answers "what did this
+/// doctor formally prescribe and when" (relevant for refills, pharmacy
+/// callbacks, and prescribing history) — the two can and do diverge
+/// (an over-the-counter medication a patient reports taking has a
+/// `MedicationEntry` with no prescription behind it at all; a
+/// prescription can be issued without necessarily also being added to
+/// the active list, e.g. a short one-off course). Issuing one of these
+/// does not automatically create or update a `MedicationEntry` — a
+/// clinician or the AI proposes `AddMedication` separately if the
+/// active list should also reflect it.
+#[derive(Debug, Clone)]
+pub struct MedicationPrescriptionEntry {
+    pub id: Uuid,
+    pub medication_name: String,
+    pub strength: Option<String>,
+    pub form: Option<String>,
+    /// Patient-facing directions for use (e.g. "1 drop in each eye
+    /// twice daily") — required, per `ThymeAction::IssueMedicationPrescription`'s
+    /// doc comment: a prescription without directions isn't one.
+    pub sig: String,
+    pub quantity: Option<String>,
+    pub refills: Option<i32>,
+    pub generic_allowed: bool,
+    pub notes: Option<String>,
+    /// `"active"` | `"voided"` — see `GlassesPrescriptionEntry::status`'s
+    /// doc comment for why there's no separate `"expired"` value.
+    pub status: String,
+    pub expires_on: Option<NaiveDate>,
+    pub voided_reason: Option<String>,
+    pub authored_by: Option<String>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
 /// The full bundle of a patient's clinical history that gets handed to
 /// the AI as context (`server::ai::prompt::build_prompt`) and to any
 /// future "patient chart" UI. Each list is already ordered newest-first
@@ -160,6 +262,9 @@ pub struct PatientHistory {
     pub lab_orders: Vec<LabOrderEntry>,
     pub referrals: Vec<ReferralEntry>,
     pub refractions: Vec<RefractionEntry>,
+    pub visit_summaries: Vec<VisitSummaryEntry>,
+    pub glasses_prescriptions: Vec<GlassesPrescriptionEntry>,
+    pub medication_prescriptions: Vec<MedicationPrescriptionEntry>,
 }
 
 impl PatientHistory {
@@ -175,6 +280,9 @@ impl PatientHistory {
             && self.lab_orders.is_empty()
             && self.referrals.is_empty()
             && self.refractions.is_empty()
+            && self.visit_summaries.is_empty()
+            && self.glasses_prescriptions.is_empty()
+            && self.medication_prescriptions.is_empty()
     }
 }
 

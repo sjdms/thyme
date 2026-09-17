@@ -49,6 +49,7 @@ use crate::{
     },
     error::Result,
 };
+use domain::action::ThymeAction;
 
 /// Statuses a queue entry can be advanced through, in order. Shared
 /// between validation and the doctor-facing "advance" action so both
@@ -1023,8 +1024,7 @@ impl ThymeServer {
 
             if status == "applied" {
                 if let Err(e) = self
-                    .history_repo
-                    .apply_action(patient_id, Some(&ai_authored_by), "ai_suggested", action)
+                    .apply_action_with_side_effects(patient_id, Some(&ai_authored_by), "ai_suggested", action)
                     .await
                 {
                     // The suggestion row already says "applied" even
@@ -1081,6 +1081,56 @@ impl ThymeServer {
     /// clinician who accepted it. Returns `Err(message)` suitable for
     /// `ApplySuggestedActionError` on any failure, including the
     /// suggestion already having been resolved.
+    /// Applies one `ThymeAction` to a patient's chart
+    /// (`HistoryRepository::apply_action`) and layers on whatever
+    /// additional, non-chart side effect that specific action implies —
+    /// today, exactly one: `ThymeAction::EndVisit` also ends the
+    /// patient's visit in the queue sense (`QueueRepository::end_visit`)
+    /// and lets every connected client know via `queue_changed`, the
+    /// same way a doctor manually clicking "End encounter" does
+    /// (`PatientQueueAdvanceRequest` with `status = "done"`).
+    ///
+    /// Centralized here — every one of this action's several apply
+    /// sites (`process_transcription`'s auto-apply loop,
+    /// `apply_suggestion`, `resolve_clarification`'s auto-apply,
+    /// `apply_all_pending`) calls this instead of
+    /// `self.history_repo.apply_action` directly — so all of them get
+    /// this side effect uniformly no matter which path a particular
+    /// `EndVisit` happens to take to get applied. That matters more
+    /// than usual right now: `ThymeAction::auto_apply`'s current `FIXME`
+    /// override means an `EndVisit` is just as likely to reach this via
+    /// the immediate-auto-apply path as via an explicit clinician
+    /// accept, and both need the visit to actually end.
+    async fn apply_action_with_side_effects(
+        &self,
+        patient_id: Uuid,
+        authored_by: Option<&str>,
+        source: &str,
+        action: &ThymeAction,
+    ) -> Result<String> {
+        let summary = self.history_repo.apply_action(patient_id, authored_by, source, action).await?;
+
+        if matches!(action, ThymeAction::EndVisit { .. }) {
+            match self.queue_repo.end_visit(patient_id).await {
+                Ok(true) => {
+                    let _ = self.queue_changed.send(());
+                }
+                Ok(false) => {
+                    // Nothing to end — see `QueueRepository::end_visit`'s
+                    // doc comment for why this is fine. The chart-side
+                    // summary above still applied regardless.
+                }
+                Err(e) => {
+                    eprintln!(
+                        "EndVisit applied to chart for patient {patient_id} but failed to end their queue visit: {e}"
+                    );
+                }
+            }
+        }
+
+        Ok(summary)
+    }
+
     async fn apply_suggestion(
         &self,
         suggestion_id: Uuid,
@@ -1101,8 +1151,7 @@ impl ThymeServer {
         })?;
 
         let summary = self
-            .history_repo
-            .apply_action(
+            .apply_action_with_side_effects(
                 record.patient_id,
                 Some(authored_by),
                 "ai_suggested",
@@ -1206,8 +1255,7 @@ impl ThymeServer {
         if new_status == "applied" {
             let ai_authored_by = format!("AI ({})", self.ai_processor.model_name());
             if let Err(e) = self
-                .history_repo
-                .apply_action(
+                .apply_action_with_side_effects(
                     record.patient_id,
                     Some(&ai_authored_by),
                     "ai_suggested",
@@ -1290,8 +1338,7 @@ impl ThymeServer {
             };
 
             match self
-                .history_repo
-                .apply_action(
+                .apply_action_with_side_effects(
                     record.patient_id,
                     Some(authored_by),
                     "ai_suggested",

@@ -14,6 +14,14 @@ export component ThymeConfirmDialog inherits ThymeCard {
     in property <string> confirm-label: "Confirm";
     in property <string> cancel-label: "Cancel";
     in property <bool> danger: false;
+    // Hides the Cancel button for a dialog that's purely
+    // acknowledgment rather than a yes/no choice — e.g. "Visit ended",
+    // announcing something that already happened rather than asking
+    // permission for it (see doctor-window.slint's end-of-visit
+    // summary dialog). `confirmed()` stays the callback either way, so
+    // a caller that only ever wires that one doesn't need to change
+    // anything to use this.
+    in property <bool> show-cancel: true;
 
     callback confirmed();
     callback cancelled();
@@ -42,7 +50,7 @@ export component ThymeConfirmDialog inherits ThymeCard {
             spacing: ThymeSpace.md;
             alignment: end;
 
-            ThymeButton {
+            if root.show-cancel: ThymeButton {
                 text: root.cancel-label;
                 kind: ThymeButtonKind.ghost;
                 width: 128px;

@@ -95,6 +95,9 @@ export component DoctorWindow inherits Window {
         lab-orders: [],
         referrals: [],
         refractions: [],
+        visit-summaries: [],
+        glasses-prescriptions: [],
+        medication-prescriptions: [],
         oct-images: [],
         pending-device-suggestions: [],
     };
@@ -153,6 +156,17 @@ export component DoctorWindow inherits Window {
     callback sign-out-confirmed();
     callback sign-out-cancelled();
 
+    // Shown after `ThymeAction::EndVisit` is applied — see
+    // `controllers::doctor::listen_ai`, which sets these whenever a
+    // just-applied or just-resolved suggestion turns out to be an
+    // `EndVisit` (checked via `action_type`, since none of the
+    // apply/resolve response packets carry it directly). A pure
+    // acknowledgment, not a yes/no choice — see
+    // `design/confirm-dialog.slint`'s `show-cancel`.
+    in-out property <bool> show-end-visit-summary: false;
+    in property <string> end-visit-summary-text: "";
+    callback end-visit-summary-dismissed();
+
     callback shortcut-pressed();
     callback shortcut-released();
     callback sign-out();
@@ -200,6 +214,9 @@ export component DoctorWindow inherits Window {
         lab-orders: [],
         referrals: [],
         refractions: [],
+        visit-summaries: [],
+        glasses-prescriptions: [],
+        medication-prescriptions: [],
         oct-images: [],
         pending-device-suggestions: [],
     };
@@ -605,6 +622,46 @@ export component DoctorWindow inherits Window {
             }
         }
 
+        if root.show-end-visit-summary: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000066;
+
+            TouchArea { }
+
+            end-visit-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.end-visit-summary-dismissed();
+                        return EventResult.accept;
+                    } else {
+                        return EventResult.reject;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        ThymeConfirmDialog {
+                            width: 420px;
+                            title: "Visit ended";
+                            message: root.end-visit-summary-text;
+                            confirm-label: "Got it";
+                            show-cancel: false;
+                            confirmed => { root.end-visit-summary-dismissed(); }
+                        }
+                    }
+                }
+
+                init => {
+                    end-visit-scope.focus();
+                }
+            }
+        }
+
         if root.recording-active || root.recording-error-text != "": Rectangle {
             width: 100%;
             height: 100%;
@@ -808,6 +865,12 @@ export component DoctorWindow inherits Window {
 
     changed show-sign-out-confirm => {
         if (!root.show-sign-out-confirm) {
+            scope.focus();
+        }
+    }
+
+    changed show-end-visit-summary => {
+        if (!root.show-end-visit-summary) {
             scope.focus();
         }
     }
