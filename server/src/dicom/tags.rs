@@ -24,10 +24,12 @@ use dicom_core::Tag;
 // tags of the DICOM data set a C-STORE actually carries.
 
 pub const COMMAND_FIELD: Tag = Tag(0x0000, 0x0100);
+pub const COMMAND_FIELD_C_ECHO: Tag = Tag(0x0020, 0x8020);
 pub const MESSAGE_ID: Tag = Tag(0x0000, 0x0110);
 pub const MESSAGE_ID_BEING_RESPONDED_TO: Tag = Tag(0x0000, 0x0120);
 pub const AFFECTED_SOP_CLASS_UID: Tag = Tag(0x0000, 0x0002);
 pub const AFFECTED_SOP_INSTANCE_UID: Tag = Tag(0x0000, 0x1000);
+#[allow(dead_code)]
 pub const PRIORITY: Tag = Tag(0x0000, 0x0700);
 pub const COMMAND_DATA_SET_TYPE: Tag = Tag(0x0000, 0x0800);
 pub const STATUS: Tag = Tag(0x0000, 0x0900);

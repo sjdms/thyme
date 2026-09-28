@@ -32,7 +32,9 @@ use std::sync::Arc;
 use dicom_core::{DataElement, PrimitiveValue, VR};
 use dicom_encoding::TransferSyntaxIndex;
 use dicom_object::InMemDicomObject;
-use dicom_transfer_syntax_registry::entries::{EXPLICIT_VR_LITTLE_ENDIAN, IMPLICIT_VR_LITTLE_ENDIAN};
+use dicom_transfer_syntax_registry::entries::{
+    EXPLICIT_VR_LITTLE_ENDIAN, IMPLICIT_VR_LITTLE_ENDIAN,
+};
 use dicom_ul::association::Association;
 use dicom_ul::pdu::{PDataValue, PDataValueType};
 use dicom_ul::{Pdu, association::server::ServerAssociationOptions};
@@ -72,7 +74,14 @@ impl DicomScp {
         device_repo: DeviceRepository,
         device_items_changed: broadcast::Sender<String>,
     ) -> Self {
-        Self { listen_addr, ae_title, store_dir, patient_repo, device_repo, device_items_changed }
+        Self {
+            listen_addr,
+            ae_title,
+            store_dir,
+            patient_repo,
+            device_repo,
+            device_items_changed,
+        }
     }
 
     /// Builds a `DicomScp` from environment configuration:
@@ -94,9 +103,18 @@ impl DicomScp {
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| "0.0.0.0:11112".parse().unwrap());
         let ae_title = std::env::var("DICOM_AE_TITLE").unwrap_or_else(|_| "THYME-SCP".to_string());
-        let store_dir = std::env::var("DICOM_STORAGE_DIR").unwrap_or_else(|_| "./dicom-storage".to_string()).into();
+        let store_dir = std::env::var("DICOM_STORAGE_DIR")
+            .unwrap_or_else(|_| "./dicom-storage".to_string())
+            .into();
 
-        Self::new(listen_addr, ae_title, store_dir, patient_repo, device_repo, device_items_changed)
+        Self::new(
+            listen_addr,
+            ae_title,
+            store_dir,
+            patient_repo,
+            device_repo,
+            device_items_changed,
+        )
     }
 
     pub async fn run(self: Arc<Self>) -> Result<()> {
@@ -143,8 +161,13 @@ impl DicomScp {
         loop {
             match association.receive().await {
                 Ok(Pdu::PData { data }) => {
-                    if let Err(e) = self.handle_p_data(&mut association, &calling_ae_title, data).await {
-                        eprintln!("error handling C-STORE on association with {calling_ae_title}: {e}");
+                    if let Err(e) = self
+                        .handle_p_data(&mut association, &calling_ae_title, data)
+                        .await
+                    {
+                        eprintln!(
+                            "error handling C-STORE on association with {calling_ae_title}: {e}"
+                        );
                     }
                 }
                 Ok(Pdu::ReleaseRQ) => {
@@ -181,29 +204,103 @@ impl DicomScp {
         calling_ae_title: &str,
         mut data: Vec<PDataValue>,
     ) -> Result<()> {
-        let Some(first) = data.first() else { return Ok(()) };
+        let Some(first) = data.first() else {
+            return Ok(());
+        };
         let presentation_context_id = first.presentation_context_id;
 
         // -- Command set --------------------------------------------
         let mut command_bytes = Vec::new();
-        while let Some(pos) = data.iter().position(|v| v.value_type == PDataValueType::Command) {
+        while let Some(pos) = data
+            .iter()
+            .position(|v| v.value_type == PDataValueType::Command)
+        {
             let value = data.remove(pos);
             let is_last = value.is_last;
             command_bytes.extend_from_slice(&value.data);
             if is_last {
                 break;
             }
-            data = self.receive_more(association, presentation_context_id, PDataValueType::Command).await?;
+            data = self
+                .receive_more(
+                    association,
+                    presentation_context_id,
+                    PDataValueType::Command,
+                )
+                .await?;
         }
 
-        let command = InMemDicomObject::read_dataset_with_ts(command_bytes.as_slice(), &IMPLICIT_VR_LITTLE_ENDIAN.erased())
-            .map_err(|e| ServerError::Dicom(format!("failed to decode DIMSE command set: {e}")))?;
+        let command = InMemDicomObject::read_dataset_with_ts(
+            command_bytes.as_slice(),
+            &IMPLICIT_VR_LITTLE_ENDIAN.erased(),
+        )
+        .map_err(|e| ServerError::Dicom(format!("failed to decode DIMSE command set: {e}")))?;
 
         let command_field = command
             .element(tags::COMMAND_FIELD)
             .ok()
             .and_then(|e| e.to_int::<i32>().ok())
             .unwrap_or_default() as u16;
+
+        if command_field == tags::COMMAND_FIELD_C_ECHO.0 {
+            // C-ECHO-RQ
+            // C-ECHO is the Verification SOP Class; this SCP doesn't
+            // implement any other DIMSE commands, so a peer that
+            // negotiates a Verification context and then sends a
+            // C-ECHO is just checking that this SCP is alive. Reply
+            // with a Success status and move on.
+            let mut response = InMemDicomObject::new_empty();
+            response.put(DataElement::new(
+                tags::COMMAND_FIELD,
+                VR::US,
+                PrimitiveValue::from(tags::COMMAND_FIELD_C_ECHO.1), // C-ECHO-RSP
+            ));
+            response.put(DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                PrimitiveValue::from(
+                    command
+                        .element(tags::MESSAGE_ID)
+                        .ok()
+                        .and_then(|e| e.to_int::<i32>().ok())
+                        .unwrap_or(1) as u16,
+                ),
+            ));
+
+            response.put(DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                PrimitiveValue::from(tags::COMMAND_DATA_SET_TYPE_NONE),
+            ));
+            response.put(DataElement::new(
+                tags::STATUS,
+                VR::US,
+                PrimitiveValue::from(tags::STATUS_SUCCESS),
+            ));
+
+            let mut buffer = Vec::new();
+            response
+                .write_dataset_with_ts(&mut buffer, &IMPLICIT_VR_LITTLE_ENDIAN.erased())
+                .map_err(|e| ServerError::Dicom(format!("failed to encode C-STORE-RSP: {e}")))?;
+
+            let rsp_res = association
+                .send(&Pdu::PData {
+                    data: vec![PDataValue {
+                        presentation_context_id,
+                        value_type: PDataValueType::Command,
+                        is_last: true,
+                        data: buffer,
+                    }],
+                })
+                .await
+                .map_err(|e| ServerError::Dicom(format!("failed to send C-REQ-RSP: {e}")));
+
+            if let Err(e) = rsp_res {
+                eprintln!("failed to send C-REQ-RSP to {calling_ae_title}: {e}");
+            }
+
+            return Ok(());
+        }
 
         if command_field != tags::COMMAND_FIELD_C_STORE_RQ {
             // Only C-STORE is served; anything else (a stray C-ECHO on
@@ -213,13 +310,19 @@ impl DicomScp {
             return Ok(());
         }
 
-        let message_id = command.element(tags::MESSAGE_ID).ok().and_then(|e| e.to_int::<i32>().ok()).unwrap_or(1);
+        let message_id = command
+            .element(tags::MESSAGE_ID)
+            .ok()
+            .and_then(|e| e.to_int::<i32>().ok())
+            .unwrap_or(1);
         let affected_sop_class_uid = command
             .element(tags::AFFECTED_SOP_CLASS_UID)
             .ok()
             .and_then(|e| e.to_str().ok())
             .map(|s| s.trim().to_string())
-            .ok_or_else(|| ServerError::Dicom("C-STORE-RQ missing Affected SOP Class UID".to_string()))?;
+            .ok_or_else(|| {
+                ServerError::Dicom("C-STORE-RQ missing Affected SOP Class UID".to_string())
+            })?;
         let affected_sop_instance_uid = command
             .element(tags::AFFECTED_SOP_INSTANCE_UID)
             .ok()
@@ -230,16 +333,20 @@ impl DicomScp {
             .element(tags::COMMAND_DATA_SET_TYPE)
             .ok()
             .and_then(|e| e.to_int::<u16>().ok())
-            .map(|v: u16 | v as u16 != tags::COMMAND_DATA_SET_TYPE_NONE)
+            .map(|v: u16| v as u16 != tags::COMMAND_DATA_SET_TYPE_NONE)
             .unwrap_or(false);
 
         // -- Data set (the actual DICOM instance being stored) -------
         if has_dataset {
             let mut dataset_bytes = Vec::new();
             loop {
-                let pos = data.iter().position(|v| v.value_type == PDataValueType::Data);
+                let pos = data
+                    .iter()
+                    .position(|v| v.value_type == PDataValueType::Data);
                 let Some(pos) = pos else {
-                    data = self.receive_more(association, presentation_context_id, PDataValueType::Data).await?;
+                    data = self
+                        .receive_more(association, presentation_context_id, PDataValueType::Data)
+                        .await?;
                     continue;
                 };
                 let value = data.remove(pos);
@@ -265,10 +372,15 @@ impl DicomScp {
 
             let transfer_syntax = dicom_transfer_syntax_registry::TransferSyntaxRegistry
                 .get(transfer_syntax_uid)
-                .ok_or_else(|| ServerError::Dicom(format!("unsupported transfer syntax {transfer_syntax_uid}")))?;
+                .ok_or_else(|| {
+                    ServerError::Dicom(format!("unsupported transfer syntax {transfer_syntax_uid}"))
+                })?;
 
-            let object = InMemDicomObject::read_dataset_with_ts(dataset_bytes.as_slice(), transfer_syntax)
-                .map_err(|e| ServerError::Dicom(format!("failed to decode DICOM data set: {e}")))?;
+            let object = InMemDicomObject::read_dataset_with_ts(
+                dataset_bytes.as_slice(),
+                transfer_syntax,
+            )
+            .map_err(|e| ServerError::Dicom(format!("failed to decode DICOM data set: {e}")))?;
 
             self.ingest(&object, calling_ae_title).await?;
         }
@@ -387,7 +499,11 @@ impl DicomScp {
             VR::US,
             PrimitiveValue::from(tags::COMMAND_DATA_SET_TYPE_NONE),
         ));
-        response.put(DataElement::new(tags::STATUS, VR::US, PrimitiveValue::from(tags::STATUS_SUCCESS)));
+        response.put(DataElement::new(
+            tags::STATUS,
+            VR::US,
+            PrimitiveValue::from(tags::STATUS_SUCCESS),
+        ));
 
         let mut buffer = Vec::new();
         // ASSUMPTION (see module doc comment): `write_dataset_with_ts`
